@@ -141,6 +141,40 @@ var (
 
 	// UPLOAD
 	UPLOAD_MAX_SIZE_MB int64
+
+	// WEBSOCKET
+	WS_READ_BUFFER_SIZE  int
+	WS_WRITE_BUFFER_SIZE int
+
+	// SERVICE-SPECIFIC (migrated from per-service configs/env.go)
+	SERVICE_VERSION string
+
+	// INTEGRATION
+	AMS_TOKEN          string
+	BI_KURS_TENGAH_URL string
+	BI_JISDOR_URL      string
+	SAP_BASE_URL       string
+	SAP_API_KEY        string
+	SAP_API_USER       string
+	SAP_API_PASSWORD   string
+
+	// CLAMAV
+	CLAMAV_ENABLED bool
+	CLAMAV_HOST    string
+	CLAMAV_PORT    string
+
+	// LLM
+	LLM_ENDPOINT string
+	LLM_EMAIL    string
+	LLM_PASSWORD string
+
+	// MAIL
+	MAIL_HOST         string
+	MAIL_PORT         int
+	MAIL_USERNAME     string
+	MAIL_PASSWORD     string
+	MAIL_FROM_ADDRESS string
+	MAIL_FROM_NAME    string
 )
 
 const (
@@ -151,6 +185,11 @@ var DefaultBaseURL string
 
 func SetDefaultBaseURL(url string) {
 	DefaultBaseURL = url
+}
+
+// LoadEnv is an alias for SetupEnvironment retained for backward compatibility
+func LoadEnv() {
+	SetupEnvironment()
 }
 
 func GetEnv[T any](key string, defaultValue ...T) T {
@@ -488,6 +527,8 @@ func setConfigFromVault(
 
 	// UPLOAD
 	UPLOAD_MAX_SIZE_MB = GetVaultItem(sMain, "UPLOAD_MAX_SIZE_MB", int64(10))
+	WS_READ_BUFFER_SIZE = GetVaultItem(sMain, "WS_READ_BUFFER_SIZE", 1024)
+	WS_WRITE_BUFFER_SIZE = GetVaultItem(sMain, "WS_WRITE_BUFFER_SIZE", 1024)
 }
 
 func setConfigFromFlatVault(sAll *vault.Response[schema.KvV2ReadResponse]) {
@@ -574,6 +615,8 @@ func setConfigFromFlatVault(sAll *vault.Response[schema.KvV2ReadResponse]) {
 
 	// UPLOAD
 	UPLOAD_MAX_SIZE_MB = GetVaultItem(sAll, "UPLOAD_MAX_SIZE_MB", int64(10))
+	WS_READ_BUFFER_SIZE = GetVaultItem(sAll, "WS_READ_BUFFER_SIZE", 1024)
+	WS_WRITE_BUFFER_SIZE = GetVaultItem(sAll, "WS_WRITE_BUFFER_SIZE", 1024)
 }
 
 func setConfigFromEnv() {
@@ -666,6 +709,38 @@ func setConfigFromEnv() {
 
 	// UPLOAD
 	UPLOAD_MAX_SIZE_MB = GetEnv[int64]("UPLOAD_MAX_SIZE_MB", 10)
+	WS_READ_BUFFER_SIZE = GetEnv("WS_READ_BUFFER_SIZE", 1024)
+	WS_WRITE_BUFFER_SIZE = GetEnv("WS_WRITE_BUFFER_SIZE", 1024)
+
+	// SERVICE-SPECIFIC (migrated from per-service configs/env.go)
+	SERVICE_VERSION = GetEnv("SERVICE_VERSION", "")
+
+	// INTEGRATION
+	AMS_TOKEN = GetEnv("AMS_TOKEN", "")
+	BI_KURS_TENGAH_URL = GetEnv("BI_KURS_TENGAH_URL", "")
+	BI_JISDOR_URL = GetEnv("BI_JISDOR_URL", "")
+	SAP_BASE_URL = GetEnv("SAP_BASE_URL", "")
+	SAP_API_KEY = GetEnv("SAP_API_KEY", "")
+	SAP_API_USER = GetEnv("SAP_API_USER", "")
+	SAP_API_PASSWORD = GetEnv("SAP_API_PASSWORD", "")
+
+	// CLAMAV
+	CLAMAV_ENABLED = GetEnv("CLAMAV_ENABLED", false)
+	CLAMAV_HOST = GetEnv("CLAMAV_HOST", "")
+	CLAMAV_PORT = GetEnv("CLAMAV_PORT", "")
+
+	// LLM
+	LLM_ENDPOINT = GetEnv("LLM_ENDPOINT", "")
+	LLM_EMAIL = GetEnv("LLM_EMAIL", "")
+	LLM_PASSWORD = GetEnv("LLM_PASSWORD", "")
+
+	// MAIL
+	MAIL_HOST = GetEnv("MAIL_HOST", "")
+	MAIL_PORT = GetEnv[int]("MAIL_PORT", 587)
+	MAIL_USERNAME = GetEnv("MAIL_USERNAME", "")
+	MAIL_PASSWORD = GetEnv("MAIL_PASSWORD", "")
+	MAIL_FROM_ADDRESS = GetEnv("MAIL_FROM_ADDRESS", "")
+	MAIL_FROM_NAME = GetEnv("MAIL_FROM_NAME", "")
 
 	validateSecretKeys()
 }
