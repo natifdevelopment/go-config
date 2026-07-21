@@ -13,7 +13,7 @@ type CorsConfig struct {
 }
 
 func LoadCorsConfig() CorsConfig {
-	originsStr := GetEnv("CORS_ALLOW_ORIGINS", "http://localhost:3000")
+	originsStr := GetEnv("CORS_ALLOW_ORIGINS", "")
 	allowOrigins := strings.Split(originsStr, ",")
 	for i, o := range allowOrigins {
 		allowOrigins[i] = strings.TrimSpace(o)

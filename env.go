@@ -148,6 +148,14 @@ var (
 
 	// SERVICE-SPECIFIC (migrated from per-service configs/env.go)
 	SERVICE_VERSION string
+	AUTO_MIGRATION  bool
+
+	// SCHEDULER
+	DATA_CONNECTOR_CRON_EXP string
+	JISDOR_CRON_EXP         string
+	SENTRAL_CRON_EXP        string
+	KURS_TENGAH_CRON_EXP    string
+	ASSET_CRON_EXP          string
 
 	// INTEGRATION
 	AMS_TOKEN          string
@@ -175,17 +183,30 @@ var (
 	MAIL_PASSWORD     string
 	MAIL_FROM_ADDRESS string
 	MAIL_FROM_NAME    string
+
+	// HELPDESK
+	HELPDESK_EMAIL    string
+	HELPDESK_PHONE    string
+	HELPDESK_WHATSAPP string
+
+	// SECURITY
+	SECURITY_ISSUE_EMAIL string
+
+	// SENTRY
+	SENTRY_DSN         string
+	SENTRY_SAMPLE_RATE float64
+
+	// OTEL
+	OTEL_TRACES_ENABLED           bool
+	OTEL_TRACES_EXPORTER          string
+	OTEL_EXPORTER_OTLP_ENDPOINT   string
+	OTEL_EXPORTER_ZIPKIN_ENDPOINT string
+	OTEL_TRACES_SAMPLE_RATE       float64
 )
 
 const (
 	envVarPrefix = "environment variable "
 )
-
-var DefaultBaseURL string
-
-func SetDefaultBaseURL(url string) {
-	DefaultBaseURL = url
-}
 
 // LoadEnv is an alias for SetupEnvironment retained for backward compatibility
 func LoadEnv() {
@@ -444,7 +465,7 @@ func setConfigFromVault(
 	sSecret *vault.Response[schema.KvV2ReadResponse],
 	sSso *vault.Response[schema.KvV2ReadResponse],
 ) {
-	BASE_URL = GetVaultItem(sMain, "BASE_URL", DefaultBaseURL)
+	BASE_URL = GetVaultItem(sMain, "BASE_URL", "")
 
 	TESTER_EMAIL = GetVaultItem(sMain, "TESTER_EMAIL", "")
 	SUPER_ADMIN_EMAIL = GetVaultItem(sMain, "SUPER_ADMIN_EMAIL", "")
@@ -501,7 +522,7 @@ func setConfigFromVault(
 	// COOKIE
 	COOKIE_MAX_AGE = GetVaultItem(sMain, "COOKIE_MAX_AGE", 3600)
 	COOKIE_PATH = GetVaultItem(sMain, "COOKIE_PATH", "/")
-	COOKIE_DOMAIN = GetVaultItem(sMain, "COOKIE_DOMAIN", "localhost")
+	COOKIE_DOMAIN = GetVaultItem(sMain, "COOKIE_DOMAIN", "")
 	COOKIE_SECURE = GetVaultItem(sMain, "COOKIE_SECURE", true)
 	COOKIE_HTTP_ONLY = GetVaultItem(sMain, "COOKIE_HTTP_ONLY", true)
 	COOKIE_PREFIX = GetVaultItem(sMain, "COOKIE_PREFIX", "")
@@ -532,7 +553,7 @@ func setConfigFromVault(
 }
 
 func setConfigFromFlatVault(sAll *vault.Response[schema.KvV2ReadResponse]) {
-	BASE_URL = GetVaultItem(sAll, "BASE_URL", DefaultBaseURL)
+	BASE_URL = GetVaultItem(sAll, "BASE_URL", "")
 
 	TESTER_EMAIL = GetVaultItem(sAll, "TESTER_EMAIL", "")
 	SUPER_ADMIN_EMAIL = GetVaultItem(sAll, "SUPER_ADMIN_EMAIL", "")
@@ -589,7 +610,7 @@ func setConfigFromFlatVault(sAll *vault.Response[schema.KvV2ReadResponse]) {
 	// COOKIE
 	COOKIE_MAX_AGE = GetVaultItem(sAll, "COOKIE_MAX_AGE", 3600)
 	COOKIE_PATH = GetVaultItem(sAll, "COOKIE_PATH", "/")
-	COOKIE_DOMAIN = GetVaultItem(sAll, "COOKIE_DOMAIN", "localhost")
+	COOKIE_DOMAIN = GetVaultItem(sAll, "COOKIE_DOMAIN", "")
 	COOKIE_SECURE = GetVaultItem(sAll, "COOKIE_SECURE", true)
 	COOKIE_HTTP_ONLY = GetVaultItem(sAll, "COOKIE_HTTP_ONLY", true)
 	COOKIE_PREFIX = GetVaultItem(sAll, "COOKIE_PREFIX", "")
@@ -620,7 +641,7 @@ func setConfigFromFlatVault(sAll *vault.Response[schema.KvV2ReadResponse]) {
 }
 
 func setConfigFromEnv() {
-	BASE_URL = GetEnv("BASE_URL", DefaultBaseURL)
+	BASE_URL = GetEnv("BASE_URL", "")
 
 	// POSTGRE
 	DATABASE_POSTGRESQL_HOST = GetEnv[string]("DATABASE_POSTGRESQL_HOST")
@@ -667,7 +688,7 @@ func setConfigFromEnv() {
 	// COOKIE
 	COOKIE_MAX_AGE = GetEnv("COOKIE_MAX_AGE", 3600)
 	COOKIE_PATH = GetEnv("COOKIE_PATH", "/")
-	COOKIE_DOMAIN = GetEnv("COOKIE_DOMAIN", "localhost")
+	COOKIE_DOMAIN = GetEnv("COOKIE_DOMAIN", "")
 	COOKIE_SECURE = GetEnv("COOKIE_SECURE", true)
 	COOKIE_HTTP_ONLY = GetEnv("COOKIE_HTTP_ONLY", true)
 	COOKIE_PREFIX = GetEnv("COOKIE_PREFIX", "")
@@ -714,6 +735,14 @@ func setConfigFromEnv() {
 
 	// SERVICE-SPECIFIC (migrated from per-service configs/env.go)
 	SERVICE_VERSION = GetEnv("SERVICE_VERSION", "")
+	AUTO_MIGRATION = GetEnv("AUTO_MIGRATION", false)
+
+	// SCHEDULER
+	DATA_CONNECTOR_CRON_EXP = GetEnv("DATA_CONNECTOR_CRON_EXP", "")
+	JISDOR_CRON_EXP = GetEnv("JISDOR_CRON_EXP", "")
+	SENTRAL_CRON_EXP = GetEnv("SENTRAL_CRON_EXP", "")
+	KURS_TENGAH_CRON_EXP = GetEnv("KURS_TENGAH_CRON_EXP", "")
+	ASSET_CRON_EXP = GetEnv("ASSET_CRON_EXP", "")
 
 	// INTEGRATION
 	AMS_TOKEN = GetEnv("AMS_TOKEN", "")
@@ -736,11 +765,30 @@ func setConfigFromEnv() {
 
 	// MAIL
 	MAIL_HOST = GetEnv("MAIL_HOST", "")
-	MAIL_PORT = GetEnv[int]("MAIL_PORT", 587)
+	MAIL_PORT = GetEnv("MAIL_PORT", 587)
 	MAIL_USERNAME = GetEnv("MAIL_USERNAME", "")
 	MAIL_PASSWORD = GetEnv("MAIL_PASSWORD", "")
 	MAIL_FROM_ADDRESS = GetEnv("MAIL_FROM_ADDRESS", "")
 	MAIL_FROM_NAME = GetEnv("MAIL_FROM_NAME", "")
+
+	// HELPDESK
+	HELPDESK_EMAIL = GetEnv("HELPDESK_EMAIL", "")
+	HELPDESK_PHONE = GetEnv("HELPDESK_PHONE", "")
+	HELPDESK_WHATSAPP = GetEnv("HELPDESK_WHATSAPP", "")
+
+	// SECURITY
+	SECURITY_ISSUE_EMAIL = GetEnv("SECURITY_ISSUE_EMAIL", "")
+
+	// SENTRY
+	SENTRY_DSN = GetEnv("SENTRY_DSN", "")
+	SENTRY_SAMPLE_RATE = GetEnv("SENTRY_SAMPLE_RATE", 1.0)
+
+	// OTEL
+	OTEL_TRACES_ENABLED = GetEnv("OTEL_TRACES_ENABLED", false)
+	OTEL_TRACES_EXPORTER = GetEnv("OTEL_TRACES_EXPORTER", "otlp")
+	OTEL_EXPORTER_OTLP_ENDPOINT = GetEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	OTEL_EXPORTER_ZIPKIN_ENDPOINT = GetEnv("OTEL_EXPORTER_ZIPKIN_ENDPOINT", "")
+	OTEL_TRACES_SAMPLE_RATE = GetEnv("OTEL_TRACES_SAMPLE_RATE", 1.0)
 
 	validateSecretKeys()
 }
@@ -763,11 +811,11 @@ func validateSecretKeys() {
 func GetVaultItem[T any](vaultData *vault.Response[schema.KvV2ReadResponse], key string, defaultValue ...T) T {
 	env, ok := vaultData.Data.Data[key]
 	if !ok || env == "" {
-		return getVaultDefaultValue[T](key, defaultValue...)
+		return getVaultDefaultValue(key, defaultValue...)
 	}
 
 	if isNAValue(env) {
-		return getVaultDefaultValue[T](key, defaultValue...)
+		return getVaultDefaultValue(key, defaultValue...)
 	}
 
 	return convertVaultValue[T](env, key)
