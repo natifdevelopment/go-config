@@ -245,6 +245,12 @@ func GetEnv[T any](key string, defaultValue ...T) T {
 			panic("failed to convert env to bool: " + err.Error())
 		}
 		result = v
+	case float64:
+		v, err := strconv.ParseFloat(env, 64)
+		if err != nil {
+			panic("failed to convert env to float64: " + err.Error())
+		}
+		result = v
 	default:
 		panic("unsupported type for GetEnv")
 	}
@@ -788,7 +794,7 @@ func setConfigFromEnv() {
 	OTEL_TRACES_EXPORTER = GetEnv("OTEL_TRACES_EXPORTER", "otlp")
 	OTEL_EXPORTER_OTLP_ENDPOINT = GetEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
 	OTEL_EXPORTER_ZIPKIN_ENDPOINT = GetEnv("OTEL_EXPORTER_ZIPKIN_ENDPOINT", "")
-	OTEL_TRACES_SAMPLE_RATE = GetEnv("OTEL_TRACES_SAMPLE_RATE", 1.0)
+	OTEL_TRACES_SAMPLE_RATE = GetEnv("OTEL_TRACES_SAMPLE_RATE", 0.05)
 
 	validateSecretKeys()
 }
@@ -796,6 +802,7 @@ func setConfigFromEnv() {
 func validateSecretKeys() {
 	const minJWTKeyLen = 32
 	const minAESKeyLen = 16
+	const minGatewaySecretLen = 32
 
 	if len(JWT_SECRET_KEY) < minJWTKeyLen {
 		panic(fmt.Sprintf("JWT_SECRET_KEY must be at least %d characters long", minJWTKeyLen))
@@ -805,6 +812,9 @@ func validateSecretKeys() {
 	}
 	if PAYLOAD_ENCRYPTION_KEY != "" && len(PAYLOAD_ENCRYPTION_KEY) < minAESKeyLen {
 		panic(fmt.Sprintf("PAYLOAD_ENCRYPTION_KEY must be at least %d characters long", minAESKeyLen))
+	}
+	if TRUST_GATEWAY && len(GATEWAY_SHARED_SECRET) < minGatewaySecretLen {
+		panic(fmt.Sprintf("GATEWAY_SHARED_SECRET must be at least %d characters long when TRUST_GATEWAY is enabled", minGatewaySecretLen))
 	}
 }
 

@@ -1,16 +1,17 @@
 package configs
 
 import (
-	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"math/big"
+	"strconv"
 	"strings"
 
 	"golang.org/x/crypto/argon2"
@@ -111,91 +112,141 @@ func Decrypt(ciphertextStr string) (string, error) {
 	return string(plaintext), nil
 }
 
+// Argon2id parameters (OWASP-recommended)
+const (
+	argon2Time    = 3         // iterations
+	argon2Memory  = 64 * 1024 // 64 MiB in KiB
+	argon2Threads = 2         // parallelism (lanes)
+	argon2KeyLen  = 32        // derived key length in bytes
+	argon2SaltLen = 16        // salt length in bytes
+)
+
+// GeneratePassword hashes a password using Argon2id with a per-user random
+// salt. The returned string is in PHC string format:
+// "$argon2id$v=19$m=65536,t=3,p=2$<base64-salt>$<base64-key>".
+// This replaces the previous static-salt implementation.
 func GeneratePassword(pwd string) (string, error) {
-	// Argon2 parameters
-	const (
-		time    = 5         // Time cost (number of iterations)
-		memory  = 64 * 1024 // Memory cost (in KB)
-		threads = 4         // Parallelism (number of threads)
-		keyLen  = 32        // Desired length of the derived key
-	)
-
-	// Hash the password with Argon2
-	hash := argon2.IDKey([]byte(pwd), []byte(CRYPTO_ENCRYPTION_KEY), time, memory, threads, keyLen)
-
-	// Encode the hash to a hexadecimal string
-	return hex.EncodeToString(hash), nil
-}
-
-func VerifyPassword(pwd, hashedPwd string) (bool, error) {
-	// Rehash the password with the same salt
-	rehashedPassword, err := GeneratePassword(pwd)
-	if err != nil {
-		return false, err
+	if pwd == "" {
+		return "", errors.New("password must not be empty")
 	}
 
-	// Compare the hashed password
-	return rehashedPassword == hashedPwd, nil
+	salt := make([]byte, argon2SaltLen)
+	if _, err := rand.Read(salt); err != nil {
+		return "", fmt.Errorf("failed to generate salt: %w", err)
+	}
+
+	hash := argon2.IDKey([]byte(pwd), salt, argon2Time, argon2Memory, argon2Threads, argon2KeyLen)
+
+	return fmt.Sprintf("$argon2id$v=19$m=%d,t=%d,p=%d$%s$%s",
+		argon2Memory,
+		argon2Time,
+		argon2Threads,
+		base64.RawStdEncoding.EncodeToString(salt),
+		base64.RawStdEncoding.EncodeToString(hash)), nil
 }
 
-// // Parameter Argon2
-// const (
-// 	time    = 3         // iterations
-// 	memory  = 64 * 1024 // 64 MB
-// 	threads = 4
-// 	keyLen  = 32
-// 	saltLen = 16
-// )
+// VerifyPassword checks a password against an encoded hash. It supports two
+// formats:
+//   - New PHC format: "$argon2id$v=19$m=...,t=...,p=...$<salt>$<key>"
+//   - Legacy hex format: plain hexadecimal hash (static salt, no "$" delimiter)
+//
+// Legacy hashes are verified with constant-time comparison and flagged for
+// rehashing on next password change. New hashes always use per-user random
+// salt and constant-time comparison.
+func VerifyPassword(pwd, hashedPwd string) (bool, error) {
+	if strings.HasPrefix(hashedPwd, "$argon2id$") {
+		return verifyArgon2idPHC(pwd, hashedPwd)
+	}
+	return verifyLegacyHash(pwd, hashedPwd)
+}
 
-// func GeneratePassword(pwd string) (string, error) {
+// verifyArgon2idPHC parses a PHC-string-format Argon2id hash and verifies the
+// password using constant-time comparison.
+func verifyArgon2idPHC(pwd, encoded string) (bool, error) {
+	parts := strings.Split(encoded, "$")
+	if len(parts) != 6 || parts[1] != "argon2id" {
+		return false, errors.New("invalid argon2id hash format")
+	}
 
-// 	// Generate random salt
-// 	salt := make([]byte, saltLen)
-// 	if _, err := rand.Read(salt); err != nil {
-// 		return "", err
-// 	}
+	var (
+		memory      uint32
+		iterations  uint32
+		parallelism uint8
+	)
 
-// 	// Hash
-// 	hash := argon2.IDKey([]byte(pwd), salt, time, memory, threads, keyLen)
+	for _, kv := range strings.Split(parts[3], ",") {
+		idx := strings.IndexByte(kv, '=')
+		if idx < 0 {
+			return false, fmt.Errorf("invalid param %q", kv)
+		}
+		k, v := kv[:idx], kv[idx+1:]
+		num, err := strconv.ParseUint(v, 10, 32)
+		if err != nil {
+			return false, fmt.Errorf("invalid param value %q: %w", kv, err)
+		}
+		switch k {
+		case "m":
+			memory = uint32(num)
+		case "t":
+			iterations = uint32(num)
+		case "p":
+			parallelism = uint8(num)
+		default:
+			return false, fmt.Errorf("unknown param %q", k)
+		}
+	}
 
-// 	// Simpan dengan format: base64(salt)$base64(hash)
-// 	encoded := fmt.Sprintf("%s$%s",
-// 		base64.RawStdEncoding.EncodeToString(salt),
-// 		base64.RawStdEncoding.EncodeToString(hash))
+	if memory == 0 || iterations == 0 || parallelism == 0 {
+		return false, errors.New("missing argon2id parameters")
+	}
 
-// 	return encoded, nil
-// }
+	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
+	if err != nil {
+		return false, fmt.Errorf("invalid salt encoding: %w", err)
+	}
 
-// func VerifyPassword(pwd, encoded string) (bool, error) {
-// 	// Format encoded: "base64(salt)$base64(hash)"
-// 	parts := strings.Split(encoded, "$")
-// 	if len(parts) != 2 {
-// 		return false, errors.New("invalid encoded hash format")
-// 	}
+	key, err := base64.RawStdEncoding.DecodeString(parts[5])
+	if err != nil {
+		return false, fmt.Errorf("invalid key encoding: %w", err)
+	}
 
-// 	// Decode salt
-// 	salt, err := base64.RawStdEncoding.DecodeString(parts[0])
-// 	if err != nil {
-// 		return false, err
-// 	}
+	if len(salt) == 0 || len(key) == 0 {
+		return false, errors.New("empty salt or key")
+	}
 
-// 	// Decode hash
-// 	hash, err := base64.RawStdEncoding.DecodeString(parts[1])
-// 	if err != nil {
-// 		return false, err
-// 	}
+	testHash := argon2.IDKey([]byte(pwd), salt, iterations, memory, parallelism, uint32(len(key)))
 
-// 	// Generate hash dari password yang diinput
-// 	testHash := argon2.IDKey([]byte(pwd), salt, time, memory, threads, uint32(len(hash)))
+	if subtle.ConstantTimeCompare(testHash, key) == 1 {
+		return true, nil
+	}
+	return false, nil
+}
 
-// 	// Constant time compare
-// 	if subtle.ConstantTimeCompare(hash, testHash) == 1 {
-// 		return true, nil
-// 	}
+// verifyLegacyHash verifies old-format hashes (plain hex, static salt) using
+// constant-time comparison. This maintains backward compatibility with
+// existing password hashes until users change their passwords.
+func verifyLegacyHash(pwd, hashedPwd string) (bool, error) {
+	storedHash, err := hex.DecodeString(hashedPwd)
+	if err != nil {
+		return false, fmt.Errorf("invalid legacy hash format: %w", err)
+	}
 
-// 	return false, nil
-// }
+	const (
+		legacyTime    = 5
+		legacyMemory  = 64 * 1024
+		legacyThreads = 4
+	)
 
+	testHash := argon2.IDKey([]byte(pwd), []byte(CRYPTO_ENCRYPTION_KEY), legacyTime, legacyMemory, legacyThreads, uint32(len(storedHash)))
+
+	if subtle.ConstantTimeCompare(testHash, storedHash) == 1 {
+		return true, nil
+	}
+	return false, nil
+}
+
+// EncryptReqBody encrypts a request body using AES-GCM with a random nonce.
+// The output is base64(nonce || ciphertext || tag).
 func EncryptReqBody(input string) (string, error) {
 	key := []byte(PAYLOAD_ENCRYPTION_KEY)
 
@@ -204,20 +255,22 @@ func EncryptReqBody(input string) (string, error) {
 		return "", errors.New(systemErrorMsg)
 	}
 
-	// Pad the input to the block size
-	padSize := aes.BlockSize - (len(input) % aes.BlockSize)
-	padding := bytes.Repeat([]byte{byte(padSize)}, padSize)
-	paddedInput := append([]byte(input), padding...)
-
-	// Encrypt each block separately
-	ciphertext := make([]byte, len(paddedInput))
-	for i := 0; i < len(paddedInput); i += aes.BlockSize {
-		block.Encrypt(ciphertext[i:i+aes.BlockSize], paddedInput[i:i+aes.BlockSize])
+	aesGCM, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", errors.New(systemErrorMsg)
 	}
 
+	nonce := make([]byte, aesGCM.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return "", errors.New(systemErrorMsg)
+	}
+
+	ciphertext := aesGCM.Seal(nonce, nonce, []byte(input), nil)
 	return base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
+// DecryptReqBody decrypts a request body produced by EncryptReqBody.
+// Input is base64-encoded (URL-safe "-" are converted to "/").
 func DecryptReqBody(encoded string) ([]byte, error) {
 	encoded = strings.ReplaceAll(encoded, "-", "/")
 
@@ -233,39 +286,21 @@ func DecryptReqBody(encoded string) ([]byte, error) {
 		return []byte{}, err
 	}
 
-	if len(ciphertext)%aes.BlockSize != 0 {
+	aesGCM, err := cipher.NewGCM(block)
+	if err != nil {
 		return []byte{}, err
 	}
 
-	// Decrypt each block separately
-	for i := 0; i < len(ciphertext); i += aes.BlockSize {
-		block.Decrypt(ciphertext[i:i+aes.BlockSize], ciphertext[i:i+aes.BlockSize])
+	nonceSize := aesGCM.NonceSize()
+	if len(ciphertext) < nonceSize {
+		return []byte{}, errors.New(systemErrorMsg)
 	}
 
-	// Remove PKCS7 padding
-	plaintext, err := pkcs7Unpad(ciphertext)
+	nonce, ct := ciphertext[:nonceSize], ciphertext[nonceSize:]
+	plaintext, err := aesGCM.Open(nil, nonce, ct, nil)
 	if err != nil {
 		return []byte{}, err
 	}
 
 	return plaintext, nil
-}
-
-func pkcs7Unpad(data []byte) ([]byte, error) {
-	if len(data) == 0 {
-		return nil, errors.New(systemErrorMsg)
-	}
-
-	padding := int(data[len(data)-1])
-	if padding > aes.BlockSize || padding == 0 {
-		return nil, errors.New(systemErrorMsg)
-	}
-
-	for i := len(data) - 1; i >= len(data)-padding; i-- {
-		if int(data[i]) != padding {
-			return nil, errors.New(systemErrorMsg)
-		}
-	}
-
-	return data[:len(data)-padding], nil
 }
