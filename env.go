@@ -202,6 +202,17 @@ var (
 	OTEL_EXPORTER_OTLP_ENDPOINT   string
 	OTEL_EXPORTER_ZIPKIN_ENDPOINT string
 	OTEL_TRACES_SAMPLE_RATE       float64
+
+	// RECAPTCHA
+	RECAPTCHA_SECRET_KEY string
+
+	// WEBAUTHN
+	WEBAUTHN_RP_ID      string
+	WEBAUTHN_RP_NAME    string
+	WEBAUTHN_RP_ORIGINS string
+
+	// CORS
+	CORS_ALLOW_ORIGINS string
 )
 
 const (
@@ -552,6 +563,74 @@ func setConfigFromVault(
 	LLM_API_TOKEN = GetVaultItem(sMain, "LLM_API_TOKEN", "")
 	LLM_DEFAULT_MODEL = GetVaultItem(sMain, "LLM_DEFAULT_MODEL", "")
 
+	// MAIL
+	MAIL_HOST = GetVaultItem(sMain, "MAIL_HOST", "")
+	MAIL_PORT = GetVaultItem(sMain, "MAIL_PORT", 587)
+	MAIL_USERNAME = GetVaultItem(sMain, "MAIL_USERNAME", "")
+	MAIL_PASSWORD = GetVaultItem(sSecret, "MAIL_PASSWORD", "")
+	MAIL_FROM_ADDRESS = GetVaultItem(sMain, "MAIL_FROM_ADDRESS", "")
+	MAIL_FROM_NAME = GetVaultItem(sMain, "MAIL_FROM_NAME", "")
+
+	// HELPDESK
+	HELPDESK_EMAIL = GetVaultItem(sMain, "HELPDESK_EMAIL", "")
+	HELPDESK_PHONE = GetVaultItem(sMain, "HELPDESK_PHONE", "")
+	HELPDESK_WHATSAPP = GetVaultItem(sMain, "HELPDESK_WHATSAPP", "")
+
+	// SECURITY
+	SECURITY_ISSUE_EMAIL = GetVaultItem(sMain, "SECURITY_ISSUE_EMAIL", "")
+
+	// CLAMAV
+	CLAMAV_ENABLED = GetVaultItem(sMain, "CLAMAV_ENABLED", false)
+	CLAMAV_HOST = GetVaultItem(sMain, "CLAMAV_HOST", "")
+	CLAMAV_PORT = GetVaultItem(sMain, "CLAMAV_PORT", "")
+
+	// LLM (legacy)
+	LLM_ENDPOINT = GetVaultItem(sMain, "LLM_ENDPOINT", "")
+	LLM_EMAIL = GetVaultItem(sMain, "LLM_EMAIL", "")
+	LLM_PASSWORD = GetVaultItem(sSecret, "LLM_PASSWORD", "")
+
+	// RECAPTCHA
+	RECAPTCHA_SECRET_KEY = GetVaultItem(sSecret, "RECAPTCHA_SECRET_KEY", "")
+
+	// WEBAUTHN
+	WEBAUTHN_RP_ID = GetVaultItem(sMain, "WEBAUTHN_RP_ID", "")
+	WEBAUTHN_RP_NAME = GetVaultItem(sMain, "WEBAUTHN_RP_NAME", "")
+	WEBAUTHN_RP_ORIGINS = GetVaultItem(sMain, "WEBAUTHN_RP_ORIGINS", "")
+
+	// CORS
+	CORS_ALLOW_ORIGINS = GetVaultItem(sMain, "CORS_ALLOW_ORIGINS", "")
+
+	// SENTRY
+	SENTRY_DSN = GetVaultItem(sMain, "SENTRY_DSN", "")
+	SENTRY_SAMPLE_RATE = GetVaultItem(sMain, "SENTRY_SAMPLE_RATE", 1.0)
+
+	// OTEL
+	OTEL_TRACES_ENABLED = GetVaultItem(sMain, "OTEL_TRACES_ENABLED", false)
+	OTEL_TRACES_EXPORTER = GetVaultItem(sMain, "OTEL_TRACES_EXPORTER", "otlp")
+	OTEL_EXPORTER_OTLP_ENDPOINT = GetVaultItem(sMain, "OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	OTEL_EXPORTER_ZIPKIN_ENDPOINT = GetVaultItem(sMain, "OTEL_EXPORTER_ZIPKIN_ENDPOINT", "")
+	OTEL_TRACES_SAMPLE_RATE = GetVaultItem(sMain, "OTEL_TRACES_SAMPLE_RATE", 0.05)
+
+	// SERVICE-SPECIFIC
+	SERVICE_VERSION = GetVaultItem(sMain, "SERVICE_VERSION", "")
+	AUTO_MIGRATION = GetVaultItem(sMain, "AUTO_MIGRATION", false)
+
+	// SCHEDULER
+	DATA_CONNECTOR_CRON_EXP = GetVaultItem(sMain, "DATA_CONNECTOR_CRON_EXP", "")
+	JISDOR_CRON_EXP = GetVaultItem(sMain, "JISDOR_CRON_EXP", "")
+	SENTRAL_CRON_EXP = GetVaultItem(sMain, "SENTRAL_CRON_EXP", "")
+	KURS_TENGAH_CRON_EXP = GetVaultItem(sMain, "KURS_TENGAH_CRON_EXP", "")
+	ASSET_CRON_EXP = GetVaultItem(sMain, "ASSET_CRON_EXP", "")
+
+	// INTEGRATION
+	AMS_TOKEN = GetVaultItem(sSecret, "AMS_TOKEN", "")
+	BI_KURS_TENGAH_URL = GetVaultItem(sMain, "BI_KURS_TENGAH_URL", "")
+	BI_JISDOR_URL = GetVaultItem(sMain, "BI_JISDOR_URL", "")
+	SAP_BASE_URL = GetVaultItem(sMain, "SAP_BASE_URL", "")
+	SAP_API_KEY = GetVaultItem(sSecret, "SAP_API_KEY", "")
+	SAP_API_USER = GetVaultItem(sMain, "SAP_API_USER", "")
+	SAP_API_PASSWORD = GetVaultItem(sSecret, "SAP_API_PASSWORD", "")
+
 	// UPLOAD
 	UPLOAD_MAX_SIZE_MB = GetVaultItem(sMain, "UPLOAD_MAX_SIZE_MB", int64(10))
 	WS_READ_BUFFER_SIZE = GetVaultItem(sMain, "WS_READ_BUFFER_SIZE", 1024)
@@ -639,6 +718,74 @@ func setConfigFromFlatVault(sAll *vault.Response[schema.KvV2ReadResponse]) {
 	LLM_API_URL = GetVaultItem(sAll, "LLM_API_URL", "")
 	LLM_API_TOKEN = GetVaultItem(sAll, "LLM_API_TOKEN", "")
 	LLM_DEFAULT_MODEL = GetVaultItem(sAll, "LLM_DEFAULT_MODEL", "")
+
+	// MAIL
+	MAIL_HOST = GetVaultItem(sAll, "MAIL_HOST", "")
+	MAIL_PORT = GetVaultItem(sAll, "MAIL_PORT", 587)
+	MAIL_USERNAME = GetVaultItem(sAll, "MAIL_USERNAME", "")
+	MAIL_PASSWORD = GetVaultItem(sAll, "MAIL_PASSWORD", "")
+	MAIL_FROM_ADDRESS = GetVaultItem(sAll, "MAIL_FROM_ADDRESS", "")
+	MAIL_FROM_NAME = GetVaultItem(sAll, "MAIL_FROM_NAME", "")
+
+	// HELPDESK
+	HELPDESK_EMAIL = GetVaultItem(sAll, "HELPDESK_EMAIL", "")
+	HELPDESK_PHONE = GetVaultItem(sAll, "HELPDESK_PHONE", "")
+	HELPDESK_WHATSAPP = GetVaultItem(sAll, "HELPDESK_WHATSAPP", "")
+
+	// SECURITY
+	SECURITY_ISSUE_EMAIL = GetVaultItem(sAll, "SECURITY_ISSUE_EMAIL", "")
+
+	// CLAMAV
+	CLAMAV_ENABLED = GetVaultItem(sAll, "CLAMAV_ENABLED", false)
+	CLAMAV_HOST = GetVaultItem(sAll, "CLAMAV_HOST", "")
+	CLAMAV_PORT = GetVaultItem(sAll, "CLAMAV_PORT", "")
+
+	// LLM (legacy)
+	LLM_ENDPOINT = GetVaultItem(sAll, "LLM_ENDPOINT", "")
+	LLM_EMAIL = GetVaultItem(sAll, "LLM_EMAIL", "")
+	LLM_PASSWORD = GetVaultItem(sAll, "LLM_PASSWORD", "")
+
+	// RECAPTCHA
+	RECAPTCHA_SECRET_KEY = GetVaultItem(sAll, "RECAPTCHA_SECRET_KEY", "")
+
+	// WEBAUTHN
+	WEBAUTHN_RP_ID = GetVaultItem(sAll, "WEBAUTHN_RP_ID", "")
+	WEBAUTHN_RP_NAME = GetVaultItem(sAll, "WEBAUTHN_RP_NAME", "")
+	WEBAUTHN_RP_ORIGINS = GetVaultItem(sAll, "WEBAUTHN_RP_ORIGINS", "")
+
+	// CORS
+	CORS_ALLOW_ORIGINS = GetVaultItem(sAll, "CORS_ALLOW_ORIGINS", "")
+
+	// SENTRY
+	SENTRY_DSN = GetVaultItem(sAll, "SENTRY_DSN", "")
+	SENTRY_SAMPLE_RATE = GetVaultItem(sAll, "SENTRY_SAMPLE_RATE", 1.0)
+
+	// OTEL
+	OTEL_TRACES_ENABLED = GetVaultItem(sAll, "OTEL_TRACES_ENABLED", false)
+	OTEL_TRACES_EXPORTER = GetVaultItem(sAll, "OTEL_TRACES_EXPORTER", "otlp")
+	OTEL_EXPORTER_OTLP_ENDPOINT = GetVaultItem(sAll, "OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	OTEL_EXPORTER_ZIPKIN_ENDPOINT = GetVaultItem(sAll, "OTEL_EXPORTER_ZIPKIN_ENDPOINT", "")
+	OTEL_TRACES_SAMPLE_RATE = GetVaultItem(sAll, "OTEL_TRACES_SAMPLE_RATE", 0.05)
+
+	// SERVICE-SPECIFIC
+	SERVICE_VERSION = GetVaultItem(sAll, "SERVICE_VERSION", "")
+	AUTO_MIGRATION = GetVaultItem(sAll, "AUTO_MIGRATION", false)
+
+	// SCHEDULER
+	DATA_CONNECTOR_CRON_EXP = GetVaultItem(sAll, "DATA_CONNECTOR_CRON_EXP", "")
+	JISDOR_CRON_EXP = GetVaultItem(sAll, "JISDOR_CRON_EXP", "")
+	SENTRAL_CRON_EXP = GetVaultItem(sAll, "SENTRAL_CRON_EXP", "")
+	KURS_TENGAH_CRON_EXP = GetVaultItem(sAll, "KURS_TENGAH_CRON_EXP", "")
+	ASSET_CRON_EXP = GetVaultItem(sAll, "ASSET_CRON_EXP", "")
+
+	// INTEGRATION
+	AMS_TOKEN = GetVaultItem(sAll, "AMS_TOKEN", "")
+	BI_KURS_TENGAH_URL = GetVaultItem(sAll, "BI_KURS_TENGAH_URL", "")
+	BI_JISDOR_URL = GetVaultItem(sAll, "BI_JISDOR_URL", "")
+	SAP_BASE_URL = GetVaultItem(sAll, "SAP_BASE_URL", "")
+	SAP_API_KEY = GetVaultItem(sAll, "SAP_API_KEY", "")
+	SAP_API_USER = GetVaultItem(sAll, "SAP_API_USER", "")
+	SAP_API_PASSWORD = GetVaultItem(sAll, "SAP_API_PASSWORD", "")
 
 	// UPLOAD
 	UPLOAD_MAX_SIZE_MB = GetVaultItem(sAll, "UPLOAD_MAX_SIZE_MB", int64(10))
@@ -776,6 +923,17 @@ func setConfigFromEnv() {
 	MAIL_PASSWORD = GetEnv("MAIL_PASSWORD", "")
 	MAIL_FROM_ADDRESS = GetEnv("MAIL_FROM_ADDRESS", "")
 	MAIL_FROM_NAME = GetEnv("MAIL_FROM_NAME", "")
+
+	// RECAPTCHA
+	RECAPTCHA_SECRET_KEY = GetEnv("RECAPTCHA_SECRET_KEY", "")
+
+	// WEBAUTHN
+	WEBAUTHN_RP_ID = GetEnv("WEBAUTHN_RP_ID", "")
+	WEBAUTHN_RP_NAME = GetEnv("WEBAUTHN_RP_NAME", "")
+	WEBAUTHN_RP_ORIGINS = GetEnv("WEBAUTHN_RP_ORIGINS", "")
+
+	// CORS
+	CORS_ALLOW_ORIGINS = GetEnv("CORS_ALLOW_ORIGINS", "")
 
 	// HELPDESK
 	HELPDESK_EMAIL = GetEnv("HELPDESK_EMAIL", "")
