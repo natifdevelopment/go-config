@@ -13,8 +13,12 @@ func SetCsrfToken(c *gin.Context) {
 		return
 	}
 
-	c.SetSameSite(http.SameSiteStrictMode)
-	c.SetCookie(COOKIE_PREFIX+"_"+"csrf_token",
+	c.SetSameSite(http.SameSiteLaxMode)
+	csrfCookieName := "csrf_token"
+	if COOKIE_PREFIX != "" {
+		csrfCookieName = COOKIE_PREFIX + "_" + "csrf_token"
+	}
+	c.SetCookie(csrfCookieName,
 		csrfToken,
 		3600,
 		COOKIE_PATH,
