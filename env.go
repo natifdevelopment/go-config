@@ -1007,8 +1007,14 @@ func convertVaultValue[T any](env any, key string) T {
 		return any(fmt.Sprintf("%v", env)).(T)
 	case int:
 		return any(convertToInt(env, key)).(T)
+	case int32:
+		return any(int32(convertToInt(env, key))).(T)
 	case int64:
 		return any(int64(convertToInt(env, key))).(T)
+	case float32:
+		return any(float32(convertToFloat(env, key))).(T)
+	case float64:
+		return any(convertToFloat(env, key)).(T)
 	case bool:
 		return any(convertToBool(env, key)).(T)
 	default:
@@ -1033,6 +1039,25 @@ func convertToInt(env any, key string) int {
 	}
 
 	return int(v)
+}
+
+func convertToFloat(env any, key string) float64 {
+	var v float64
+	var err error
+
+	if num, ok := env.(json.Number); ok {
+		v, err = num.Float64()
+	} else if str, ok := env.(string); ok {
+		v, err = strconv.ParseFloat(str, 64)
+	} else {
+		panic("env " + key + " is not number or string")
+	}
+
+	if err != nil {
+		panic("failed get env item " + key + " with error: " + err.Error())
+	}
+
+	return v
 }
 
 func convertToBool(env any, key string) bool {
