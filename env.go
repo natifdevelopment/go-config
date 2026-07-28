@@ -482,6 +482,7 @@ func setConfigFromVault(
 	sSecret *vault.Response[schema.KvV2ReadResponse],
 	sSso *vault.Response[schema.KvV2ReadResponse],
 ) {
+	ENVIRONMENT = GetVaultItem(sMain, "ENVIRONMENT", ENVIRONMENT)
 	BASE_URL = GetVaultItem(sMain, "BASE_URL", "")
 
 	TESTER_EMAIL = GetVaultItem(sMain, "TESTER_EMAIL", "")
@@ -638,6 +639,7 @@ func setConfigFromVault(
 }
 
 func setConfigFromFlatVault(sAll *vault.Response[schema.KvV2ReadResponse]) {
+	ENVIRONMENT = GetVaultItem(sAll, "ENVIRONMENT", ENVIRONMENT)
 	BASE_URL = GetVaultItem(sAll, "BASE_URL", "")
 
 	TESTER_EMAIL = GetVaultItem(sAll, "TESTER_EMAIL", "")
