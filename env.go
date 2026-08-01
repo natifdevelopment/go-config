@@ -17,17 +17,21 @@ import (
 
 var (
 	// Vault
-	VAULT_ADDR            string
-	VAULT_ENDPOINT        string
-	VAULT_TOKEN           string
-	VAULT_PATH            string
-	VAULT_MOUNT           string
-	VAULT_SECRET_PATH     string
-	VAULT_AUTH_METHOD     string
-	VAULT_ROLE_ID         string
-	VAULT_SECRET_ID       string
-	VAULT_FALLBACK_TO_ENV bool
-	SECRET_PROVIDER       string
+	VAULT_ADDR              string
+	VAULT_ENDPOINT          string
+	VAULT_TOKEN             string
+	VAULT_PATH              string
+	VAULT_MOUNT             string
+	VAULT_SECRET_PATH       string
+	VAULT_SECRET_PATHS      []string // multi-path support (comma-separated), takes precedence over VAULT_SECRET_PATH
+	VAULT_SHARED_SUBPATHS   []string // sub-paths to read from shared paths (comma-separated), default: all
+	VAULT_AUTH_METHOD       string
+	VAULT_ROLE_ID           string // AppRole for service-specific path
+	VAULT_SECRET_ID         string // AppRole for service-specific path
+	VAULT_SHARED_ROLE_ID    string // AppRole for shared paths (optional, falls back to VAULT_ROLE_ID)
+	VAULT_SHARED_SECRET_ID  string // AppRole for shared paths (optional, falls back to VAULT_SECRET_ID)
+	VAULT_FALLBACK_TO_ENV   bool
+	SECRET_PROVIDER         string
 
 	// Common
 	SERVICE_NAME          string
@@ -145,6 +149,18 @@ var (
 	// WEBSOCKET
 	WS_READ_BUFFER_SIZE  int
 	WS_WRITE_BUFFER_SIZE int
+
+	// KAFKA
+	KAFKA_BROKER            string
+	KAFKA_BROKERS           string
+	KAFKA_BROKER_ADDRESSES  string
+	KAFKA_CLIENT_ID         string
+	KAFKA_GROUP             string
+	KAFKA_SASL_USER         string
+	KAFKA_SASL_PASSWORD     string
+	KAFKA_SASL_MECHANISM    string
+	KAFKA_TLS_ENABLE        bool
+	KAFKA_TLS_SKIP_VERIFY   bool
 
 	// SERVICE-SPECIFIC (migrated from per-service configs/env.go)
 	SERVICE_VERSION string
@@ -273,9 +289,23 @@ func SetupVault() error {
 	fmt.Printf("[Vault] Starting Vault connection setup...\n")
 	fmt.Printf("[Vault] Vault Address: %s\n", VAULT_ADDR)
 	fmt.Printf("[Vault] Auth Method: %s\n", VAULT_AUTH_METHOD)
-	fmt.Printf("[Vault] Secret Path: %s\n", VAULT_SECRET_PATH)
 	fmt.Printf("[Vault] Mount: %s\n", VAULT_MOUNT)
 
+	// Multi-path mode: read from multiple paths and merge
+	if len(VAULT_SECRET_PATHS) > 0 {
+		fmt.Printf("[Vault] Multi-path mode: %d paths\n", len(VAULT_SECRET_PATHS))
+		for i, p := range VAULT_SECRET_PATHS {
+			fmt.Printf("[Vault]   Path %d: %s\n", i+1, p)
+		}
+		return setupVaultMultiPath()
+	}
+
+	// Single-path mode (backward compatible)
+	fmt.Printf("[Vault] Secret Path: %s\n", VAULT_SECRET_PATH)
+	return setupVaultSinglePath()
+}
+
+func setupVaultSinglePath() error {
 	ctx := context.Background()
 
 	fmt.Printf("[Vault] Creating Vault client...\n")
@@ -310,6 +340,145 @@ func SetupVault() error {
 	setConfigFromFlatVault(sAll)
 	fmt.Printf("[Vault] Vault configuration applied successfully\n")
 	return nil
+}
+
+// setupVaultMultiPath reads secrets from multiple Vault paths and merges them.
+// Later paths override earlier ones (e.g., service-specific overrides shared).
+// Each path is tried as flat first, then hierarchical sub-paths.
+//
+// Hierarchical sub-paths (for shared paths like development/bbo/shared):
+//   main, database_postgre, redis, s3, sso, mail, llm
+//
+// Passwords live in their respective sub-path (e.g., DB password in database_postgre,
+// Redis password in redis, S3 keys in s3, SSO secret in sso, Mail password in mail,
+// LLM token in llm). JWT/CRYPTO/GATEWAY_SHARED_SECRET/AMS/SAP/RECAPTCHA live in main.
+//
+// Service-specific paths (e.g., development/bbo/bbo-billing-api) are typically flat.
+// CLAMAV_* lives in shared/main (read by all, used only by services that need it).
+// WEBAUTHN falls back to FE_* values if empty (see webauthn.go), so no separate sub-path needed.
+func setupVaultMultiPath() error {
+	ctx := context.Background()
+
+	fmt.Printf("[Vault] Creating Vault client...\n")
+	client, err := vault.New(
+		vault.WithAddress(VAULT_ADDR),
+		vault.WithRequestTimeout(30*time.Second),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create vault client: %w", err)
+	}
+	fmt.Printf("[Vault] Vault client created successfully\n")
+
+	// merged accumulates all secrets from all paths; later paths override earlier
+	merged := make(map[string]any)
+
+	// Hierarchical sub-paths for shared infrastructure secrets.
+	// If VAULT_SHARED_SUBPATHS is set, use only those (least-privilege per service).
+	// Otherwise default to all sub-paths (backward compatible).
+	defaultSubPaths := []string{"main", "database_postgre", "redis", "s3", "sso", "mail", "llm"}
+	hierarchicalSubPaths := defaultSubPaths
+	if len(VAULT_SHARED_SUBPATHS) > 0 {
+		hierarchicalSubPaths = VAULT_SHARED_SUBPATHS
+		fmt.Printf("[Vault] Using selective sub-paths: %v\n", hierarchicalSubPaths)
+	}
+
+	// Detect if shared AppRole is different from service AppRole
+	useDualAppRole := VAULT_AUTH_METHOD == "APPROLE" &&
+		(VAULT_SHARED_ROLE_ID != VAULT_ROLE_ID || VAULT_SHARED_SECRET_ID != VAULT_SECRET_ID)
+
+	// Create shared client if dual AppRole
+	var sharedClient *vault.Client
+	if useDualAppRole {
+		fmt.Printf("[Vault] Using dual AppRole: shared + service-specific\n")
+		sharedClient, err = vault.New(
+			vault.WithAddress(VAULT_ADDR),
+			vault.WithRequestTimeout(30*time.Second),
+		)
+		if err != nil {
+			return fmt.Errorf("failed to create shared vault client: %w", err)
+		}
+		if err := authenticateSharedAppRole(ctx, sharedClient); err != nil {
+			return err
+		}
+	}
+
+	// Authenticate service-specific client
+	if err := authenticateVaultClient(ctx, client); err != nil {
+		return err
+	}
+
+	// Determine which paths are "shared" (use shared AppRole) vs "service-specific" (use service AppRole)
+	// Heuristic: path containing "/shared" uses shared AppRole, others use service AppRole
+	for _, path := range VAULT_SECRET_PATHS {
+		fmt.Printf("[Vault] Reading path: %s\n", path)
+
+		// Select client: shared paths use sharedClient (if dual), others use service client
+		activeClient := client
+		if useDualAppRole && strings.Contains(path, "/shared") {
+			activeClient = sharedClient
+			fmt.Printf("[Vault]   - Using shared AppRole for this path\n")
+		}
+
+		// Try flat read first (service-specific paths are usually flat)
+		sAll, err := activeClient.Secrets.KvV2Read(ctx, path, vault.WithMountPath(VAULT_MOUNT))
+		if err == nil {
+			fmt.Printf("[Vault]   - Flat structure found for: %s\n", path)
+			mergeVaultData(merged, sAll.Data.Data)
+			continue
+		}
+
+		// Try hierarchical sub-paths (shared paths use this structure)
+		fmt.Printf("[Vault]   - Flat failed for %s, trying hierarchical...\n", path)
+		anySuccess := false
+		for _, sub := range hierarchicalSubPaths {
+			fullPath := path + "/" + sub
+			resp, err := activeClient.Secrets.KvV2Read(ctx, fullPath, vault.WithMountPath(VAULT_MOUNT))
+			if err != nil {
+				fmt.Printf("[Vault]   - %s/%s: not found (skipping)\n", path, sub)
+				continue
+			}
+			fmt.Printf("[Vault]   - %s/%s: OK\n", path, sub)
+			mergeVaultData(merged, resp.Data.Data)
+			anySuccess = true
+		}
+
+		if !anySuccess {
+			return fmt.Errorf("failed to read any secrets from path: %s (tried flat and hierarchical)", path)
+		}
+	}
+
+	fmt.Printf("[Vault] All paths read successfully, merged %d keys\n", len(merged))
+	fmt.Printf("[Vault] Applying merged configuration...\n")
+	setConfigFromMergedVault(merged)
+	fmt.Printf("[Vault] Vault configuration applied successfully\n")
+	return nil
+}
+
+// authenticateSharedAppRole logs in with the shared AppRole credentials.
+func authenticateSharedAppRole(ctx context.Context, client *vault.Client) error {
+	fmt.Printf("[Vault] Using shared AppRole authentication...\n")
+	if VAULT_SHARED_ROLE_ID == "" || VAULT_SHARED_SECRET_ID == "" {
+		return fmt.Errorf("VAULT_SHARED_ROLE_ID and VAULT_SHARED_SECRET_ID are required for shared AppRole")
+	}
+	resp, err := client.Auth.AppRoleLogin(ctx, schema.AppRoleLoginRequest{
+		RoleId:   VAULT_SHARED_ROLE_ID,
+		SecretId: VAULT_SHARED_SECRET_ID,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to login with shared AppRole: %w", err)
+	}
+	if err := client.SetToken(resp.Auth.ClientToken); err != nil {
+		return fmt.Errorf("failed to set shared vault token: %w", err)
+	}
+	fmt.Printf("[Vault] Shared AppRole login successful\n")
+	return nil
+}
+
+// mergeVaultData merges src into dst. Keys in src override keys in dst.
+func mergeVaultData(dst map[string]any, src map[string]any) {
+	for k, v := range src {
+		dst[k] = v
+	}
 }
 
 func authenticateVaultClient(ctx context.Context, client *vault.Client) error {
@@ -423,6 +592,35 @@ func setupVaultConfig() {
 	VAULT_SECRET_PATH = strings.TrimSuffix(GetEnv("VAULT_SECRET_PATH", ""), "/")
 	VAULT_PATH = GetEnv("VAULT_PATH", "")
 
+	// Multi-path support: VAULT_SECRET_PATHS (comma-separated) takes precedence over VAULT_SECRET_PATH
+	// Example: "development/bbo/shared,development/bbo/bbo-shipment-cfr-api"
+	// Later paths override earlier ones (service-specific overrides shared).
+	multiPaths := GetEnv("VAULT_SECRET_PATHS", "")
+	if multiPaths != "" {
+		for _, p := range strings.Split(multiPaths, ",") {
+			p = strings.TrimSpace(p)
+			p = strings.TrimSuffix(p, "/")
+			if p != "" {
+				VAULT_SECRET_PATHS = append(VAULT_SECRET_PATHS, p)
+			}
+		}
+	}
+
+	// Selective sub-paths: VAULT_SHARED_SUBPATHS (comma-separated)
+	// Lets each service declare which shared sub-paths it needs (least-privilege).
+	// Example: "database_postgre,redis,secret,sso" (no kafka/s3 if not needed)
+	// Default: all sub-paths are tried (backward compatible).
+	sharedSubPaths := GetEnv("VAULT_SHARED_SUBPATHS", "")
+	if sharedSubPaths != "" {
+		for _, p := range strings.Split(sharedSubPaths, ",") {
+			p = strings.TrimSpace(p)
+			p = strings.TrimSuffix(p, "/")
+			if p != "" {
+				VAULT_SHARED_SUBPATHS = append(VAULT_SHARED_SUBPATHS, p)
+			}
+		}
+	}
+
 	parseVaultPath()
 
 	if VAULT_MOUNT == "" {
@@ -458,6 +656,9 @@ func setupVaultAuth() {
 	if VAULT_AUTH_METHOD == "APPROLE" {
 		VAULT_ROLE_ID = GetEnv("VAULT_ROLE_ID", "")
 		VAULT_SECRET_ID = GetEnv("VAULT_SECRET_ID", "")
+		// Shared AppRole (optional — falls back to service-specific if not set)
+		VAULT_SHARED_ROLE_ID = GetEnv("VAULT_SHARED_ROLE_ID", VAULT_ROLE_ID)
+		VAULT_SHARED_SECRET_ID = GetEnv("VAULT_SHARED_SECRET_ID", VAULT_SECRET_ID)
 	} else {
 		VAULT_TOKEN = GetEnv("VAULT_TOKEN", "")
 	}
@@ -636,6 +837,18 @@ func setConfigFromVault(
 	UPLOAD_MAX_SIZE_MB = GetVaultItem(sMain, "UPLOAD_MAX_SIZE_MB", int64(10))
 	WS_READ_BUFFER_SIZE = GetVaultItem(sMain, "WS_READ_BUFFER_SIZE", 1024)
 	WS_WRITE_BUFFER_SIZE = GetVaultItem(sMain, "WS_WRITE_BUFFER_SIZE", 1024)
+
+	// KAFKA
+	KAFKA_BROKER = GetVaultItem(sMain, "KAFKA_BROKER", "")
+	KAFKA_BROKERS = GetVaultItem(sMain, "KAFKA_BROKERS", "")
+	KAFKA_BROKER_ADDRESSES = GetVaultItem(sMain, "KAFKA_BROKER_ADDRESSES", "")
+	KAFKA_CLIENT_ID = GetVaultItem(sMain, "KAFKA_CLIENT_ID", "")
+	KAFKA_GROUP = GetVaultItem(sMain, "KAFKA_GROUP", "")
+	KAFKA_SASL_USER = GetVaultItem(sSecret, "KAFKA_SASL_USER", "")
+	KAFKA_SASL_PASSWORD = GetVaultItem(sSecret, "KAFKA_SASL_PASSWORD", "")
+	KAFKA_SASL_MECHANISM = GetVaultItem(sMain, "KAFKA_SASL_MECHANISM", "SCRAM-SHA-512")
+	KAFKA_TLS_ENABLE = GetVaultItem(sMain, "KAFKA_TLS_ENABLE", false)
+	KAFKA_TLS_SKIP_VERIFY = GetVaultItem(sMain, "KAFKA_TLS_SKIP_VERIFY", false)
 }
 
 func setConfigFromFlatVault(sAll *vault.Response[schema.KvV2ReadResponse]) {
@@ -793,6 +1006,204 @@ func setConfigFromFlatVault(sAll *vault.Response[schema.KvV2ReadResponse]) {
 	UPLOAD_MAX_SIZE_MB = GetVaultItem(sAll, "UPLOAD_MAX_SIZE_MB", int64(10))
 	WS_READ_BUFFER_SIZE = GetVaultItem(sAll, "WS_READ_BUFFER_SIZE", 1024)
 	WS_WRITE_BUFFER_SIZE = GetVaultItem(sAll, "WS_WRITE_BUFFER_SIZE", 1024)
+
+	// KAFKA
+	KAFKA_BROKER = GetVaultItem(sAll, "KAFKA_BROKER", "")
+	KAFKA_BROKERS = GetVaultItem(sAll, "KAFKA_BROKERS", "")
+	KAFKA_BROKER_ADDRESSES = GetVaultItem(sAll, "KAFKA_BROKER_ADDRESSES", "")
+	KAFKA_CLIENT_ID = GetVaultItem(sAll, "KAFKA_CLIENT_ID", "")
+	KAFKA_GROUP = GetVaultItem(sAll, "KAFKA_GROUP", "")
+	KAFKA_SASL_USER = GetVaultItem(sAll, "KAFKA_SASL_USER", "")
+	KAFKA_SASL_PASSWORD = GetVaultItem(sAll, "KAFKA_SASL_PASSWORD", "")
+	KAFKA_SASL_MECHANISM = GetVaultItem(sAll, "KAFKA_SASL_MECHANISM", "SCRAM-SHA-512")
+	KAFKA_TLS_ENABLE = GetVaultItem(sAll, "KAFKA_TLS_ENABLE", false)
+	KAFKA_TLS_SKIP_VERIFY = GetVaultItem(sAll, "KAFKA_TLS_SKIP_VERIFY", false)
+}
+
+// setConfigFromMergedVault applies config from a merged map of secrets gathered
+// from multiple Vault paths. It mirrors setConfigFromFlatVault but uses GetMergedItem.
+func setConfigFromMergedVault(merged map[string]any) {
+	ENVIRONMENT = GetMergedItem(merged, "ENVIRONMENT", ENVIRONMENT)
+	BASE_URL = GetMergedItem(merged, "BASE_URL", "")
+
+	TESTER_EMAIL = GetMergedItem(merged, "TESTER_EMAIL", "")
+	SUPER_ADMIN_EMAIL = GetMergedItem(merged, "SUPER_ADMIN_EMAIL", "")
+	RATE_LIMITER_ALERT_EMAIL = GetMergedItem(merged, "RATE_LIMITER_ALERT_EMAIL", "")
+
+	FE_APP_NAME = GetMergedItem[string](merged, "FE_APP_NAME")
+	FE_HOST = GetMergedItem[string](merged, "FE_HOST")
+	FE_URL = GetMergedItem[string](merged, "FE_URL")
+
+	PAGINATION_LIMIT = GetMergedItem(merged, "PAGINATION_LIMIT", 250)
+
+	// POSTGRE
+	DATABASE_POSTGRESQL_HOST = GetMergedItem[string](merged, "DATABASE_POSTGRESQL_HOST")
+	DATABASE_POSTGRESQL_PORT = GetMergedItem[int](merged, "DATABASE_POSTGRESQL_PORT")
+	DATABASE_POSTGRESQL_USER = GetMergedItem[string](merged, "DATABASE_POSTGRESQL_USER")
+	DATABASE_POSTGRESQL_PASSWORD = GetMergedItem[string](merged, "DATABASE_POSTGRESQL_PASSWORD")
+	DATABASE_POSTGRESQL_DB_NAME = GetMergedItem[string](merged, "DATABASE_POSTGRESQL_DB_NAME")
+	ENABLE_AUTO_MIGRATION = GetMergedItem(merged, "ENABLE_AUTO_MIGRATION", true)
+
+	// POSTGRE SLAVE
+	DATABASE_POSTGRESQL_SLAVE_HOST = GetMergedItem(merged, "DATABASE_POSTGRESQL_SLAVE_HOST", "")
+	DATABASE_POSTGRESQL_SLAVE_PORT = GetMergedItem(merged, "DATABASE_POSTGRESQL_SLAVE_PORT", 0)
+	DATABASE_POSTGRESQL_SLAVE_USER = GetMergedItem(merged, "DATABASE_POSTGRESQL_SLAVE_USER", "")
+	DATABASE_POSTGRESQL_SLAVE_PASSWORD = GetMergedItem(merged, "DATABASE_POSTGRESQL_SLAVE_PASSWORD", "")
+	DATABASE_POSTGRESQL_SLAVE_DB_NAME = GetMergedItem(merged, "DATABASE_POSTGRESQL_SLAVE_DB_NAME", "")
+
+	// REDIS
+	REDIS_HOST = GetMergedItem[string](merged, "REDIS_HOST")
+	REDIS_PORT = GetMergedItem[string](merged, "REDIS_PORT")
+	REDIS_USERNAME = GetMergedItem(merged, "REDIS_USERNAME", "")
+	REDIS_PASSWORD = GetMergedItem(merged, "REDIS_PASSWORD", "")
+	REDIS_DB = GetMergedItem(merged, "REDIS_DB", 0)
+
+	// S3 STORAGE
+	S3_REGION = GetMergedItem(merged, "S3_REGION", "")
+	S3_ACCESS_KEY_ID = GetMergedItem[string](merged, "S3_ACCESS_KEY_ID")
+	S3_SECRET_KEY = GetMergedItem[string](merged, "S3_SECRET_KEY")
+	S3_TOKEN = GetMergedItem(merged, "S3_TOKEN", "")
+	S3_BUCKET_NAME = GetMergedItem[string](merged, "S3_BUCKET_NAME")
+	S3_ENDPOINT = GetMergedItem[string](merged, "S3_ENDPOINT")
+	S3_USE_SSL = GetMergedItem(merged, "S3_USE_SSL", true)
+	S3_FORCE_PATH_STYLE = GetMergedItem(merged, "S3_FORCE_PATH_STYLE", true)
+
+	// SSO (Single Sign On)
+	SSO_CLIENT_ID = GetMergedItem(merged, "SSO_CLIENT_ID", "")
+	SSO_CLIENT_SECRET = GetMergedItem(merged, "SSO_CLIENT_SECRET", "")
+	SSO_API_SERVER_URL = GetMergedItem(merged, "SSO_API_SERVER_URL", "")
+	SSO_API_TOKEN_URL = GetMergedItem(merged, "SSO_API_TOKEN_URL", "")
+	SSO_API_USER_INFO_URL = GetMergedItem(merged, "SSO_API_USER_INFO_URL", "")
+	SSO_API_VALIDATE_JWT_URL = GetMergedItem(merged, "SSO_API_VALIDATE_JWT_URL", "")
+	SSO_REDIRECT_URL = GetMergedItem(merged, "SSO_REDIRECT_URL", "")
+	SSO_AUTHORIZE_URL = GetMergedItem(merged, "SSO_AUTHORIZE_URL", "")
+
+	// COOKIE
+	COOKIE_MAX_AGE = GetMergedItem(merged, "COOKIE_MAX_AGE", 3600)
+	COOKIE_PATH = GetMergedItem(merged, "COOKIE_PATH", "/")
+	COOKIE_DOMAIN = GetMergedItem(merged, "COOKIE_DOMAIN", "")
+	COOKIE_SECURE = GetMergedItem(merged, "COOKIE_SECURE", true)
+	COOKIE_HTTP_ONLY = GetMergedItem(merged, "COOKIE_HTTP_ONLY", true)
+	COOKIE_PREFIX = GetMergedItem(merged, "COOKIE_PREFIX", "")
+
+	// JWT
+	JWT_SECRET_KEY = GetMergedItem[string](merged, "JWT_SECRET_KEY")
+
+	// CRYPTO
+	CRYPTO_ENCRYPTION_KEY = GetMergedItem[string](merged, "CRYPTO_ENCRYPTION_KEY")
+	PAYLOAD_ENCRYPTION_KEY = GetMergedItem[string](merged, "PAYLOAD_ENCRYPTION_KEY")
+	CRYPTO_PASSWORD = GetMergedItem(merged, "CRYPTO_PASSWORD", "")
+
+	types.SetEncryptionKey(CRYPTO_ENCRYPTION_KEY)
+
+	// GATEWAY
+	TRUST_GATEWAY = GetMergedItem(merged, "TRUST_GATEWAY", false)
+	GATEWAY_SHARED_SECRET = GetMergedItem(merged, "GATEWAY_SHARED_SECRET", "")
+
+	// LLM
+	LLM_API_URL = GetMergedItem(merged, "LLM_API_URL", "")
+	LLM_API_TOKEN = GetMergedItem(merged, "LLM_API_TOKEN", "")
+	LLM_DEFAULT_MODEL = GetMergedItem(merged, "LLM_DEFAULT_MODEL", "")
+
+	// MAIL
+	MAIL_HOST = GetMergedItem(merged, "MAIL_HOST", "")
+	MAIL_PORT = GetMergedItem(merged, "MAIL_PORT", 587)
+	MAIL_USERNAME = GetMergedItem(merged, "MAIL_USERNAME", "")
+	MAIL_PASSWORD = GetMergedItem(merged, "MAIL_PASSWORD", "")
+	MAIL_FROM_ADDRESS = GetMergedItem(merged, "MAIL_FROM_ADDRESS", "")
+	MAIL_FROM_NAME = GetMergedItem(merged, "MAIL_FROM_NAME", "")
+
+	// HELPDESK
+	HELPDESK_EMAIL = GetMergedItem(merged, "HELPDESK_EMAIL", "")
+	HELPDESK_PHONE = GetMergedItem(merged, "HELPDESK_PHONE", "")
+	HELPDESK_WHATSAPP = GetMergedItem(merged, "HELPDESK_WHATSAPP", "")
+
+	// SECURITY
+	SECURITY_ISSUE_EMAIL = GetMergedItem(merged, "SECURITY_ISSUE_EMAIL", "")
+
+	// CLAMAV
+	CLAMAV_ENABLED = GetMergedItem(merged, "CLAMAV_ENABLED", false)
+	CLAMAV_HOST = GetMergedItem(merged, "CLAMAV_HOST", "")
+	CLAMAV_PORT = GetMergedItem(merged, "CLAMAV_PORT", "")
+
+	// LLM (legacy)
+	LLM_ENDPOINT = GetMergedItem(merged, "LLM_ENDPOINT", "")
+	LLM_EMAIL = GetMergedItem(merged, "LLM_EMAIL", "")
+	LLM_PASSWORD = GetMergedItem(merged, "LLM_PASSWORD", "")
+
+	// RECAPTCHA
+	RECAPTCHA_SECRET_KEY = GetMergedItem(merged, "RECAPTCHA_SECRET_KEY", "")
+
+	// WEBAUTHN
+	WEBAUTHN_RP_ID = GetMergedItem(merged, "WEBAUTHN_RP_ID", "")
+	WEBAUTHN_RP_NAME = GetMergedItem(merged, "WEBAUTHN_RP_NAME", "")
+	WEBAUTHN_RP_ORIGINS = GetMergedItem(merged, "WEBAUTHN_RP_ORIGINS", "")
+
+	// CORS
+	CORS_ALLOW_ORIGINS = GetMergedItem(merged, "CORS_ALLOW_ORIGINS", "")
+
+	// SENTRY
+	SENTRY_DSN = GetMergedItem(merged, "SENTRY_DSN", "")
+	SENTRY_SAMPLE_RATE = GetMergedItem(merged, "SENTRY_SAMPLE_RATE", 1.0)
+
+	// OTEL
+	OTEL_TRACES_ENABLED = GetMergedItem(merged, "OTEL_TRACES_ENABLED", false)
+	OTEL_TRACES_EXPORTER = GetMergedItem(merged, "OTEL_TRACES_EXPORTER", "otlp")
+	OTEL_EXPORTER_OTLP_ENDPOINT = GetMergedItem(merged, "OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	OTEL_EXPORTER_ZIPKIN_ENDPOINT = GetMergedItem(merged, "OTEL_EXPORTER_ZIPKIN_ENDPOINT", "")
+	OTEL_TRACES_SAMPLE_RATE = GetMergedItem(merged, "OTEL_TRACES_SAMPLE_RATE", 0.05)
+
+	// SERVICE-SPECIFIC
+	SERVICE_VERSION = GetMergedItem(merged, "SERVICE_VERSION", "")
+	AUTO_MIGRATION = GetMergedItem(merged, "AUTO_MIGRATION", false)
+
+	// SCHEDULER
+	DATA_CONNECTOR_CRON_EXP = GetMergedItem(merged, "DATA_CONNECTOR_CRON_EXP", "")
+	JISDOR_CRON_EXP = GetMergedItem(merged, "JISDOR_CRON_EXP", "")
+	SENTRAL_CRON_EXP = GetMergedItem(merged, "SENTRAL_CRON_EXP", "")
+	KURS_TENGAH_CRON_EXP = GetMergedItem(merged, "KURS_TENGAH_CRON_EXP", "")
+	ASSET_CRON_EXP = GetMergedItem(merged, "ASSET_CRON_EXP", "")
+
+	// INTEGRATION
+	AMS_TOKEN = GetMergedItem(merged, "AMS_TOKEN", "")
+	BI_KURS_TENGAH_URL = GetMergedItem(merged, "BI_KURS_TENGAH_URL", "")
+	BI_JISDOR_URL = GetMergedItem(merged, "BI_JISDOR_URL", "")
+	SAP_BASE_URL = GetMergedItem(merged, "SAP_BASE_URL", "")
+	SAP_API_KEY = GetMergedItem(merged, "SAP_API_KEY", "")
+	SAP_API_USER = GetMergedItem(merged, "SAP_API_USER", "")
+	SAP_API_PASSWORD = GetMergedItem(merged, "SAP_API_PASSWORD", "")
+
+	// UPLOAD
+	UPLOAD_MAX_SIZE_MB = GetMergedItem(merged, "UPLOAD_MAX_SIZE_MB", int64(10))
+	WS_READ_BUFFER_SIZE = GetMergedItem(merged, "WS_READ_BUFFER_SIZE", 1024)
+	WS_WRITE_BUFFER_SIZE = GetMergedItem(merged, "WS_WRITE_BUFFER_SIZE", 1024)
+
+	// KAFKA
+	KAFKA_BROKER = GetMergedItem(merged, "KAFKA_BROKER", "")
+	KAFKA_BROKERS = GetMergedItem(merged, "KAFKA_BROKERS", "")
+	KAFKA_BROKER_ADDRESSES = GetMergedItem(merged, "KAFKA_BROKER_ADDRESSES", "")
+	KAFKA_CLIENT_ID = GetMergedItem(merged, "KAFKA_CLIENT_ID", "")
+	KAFKA_GROUP = GetMergedItem(merged, "KAFKA_GROUP", "")
+	KAFKA_SASL_USER = GetMergedItem(merged, "KAFKA_SASL_USER", "")
+	KAFKA_SASL_PASSWORD = GetMergedItem(merged, "KAFKA_SASL_PASSWORD", "")
+	KAFKA_SASL_MECHANISM = GetMergedItem(merged, "KAFKA_SASL_MECHANISM", "SCRAM-SHA-512")
+	KAFKA_TLS_ENABLE = GetMergedItem(merged, "KAFKA_TLS_ENABLE", false)
+	KAFKA_TLS_SKIP_VERIFY = GetMergedItem(merged, "KAFKA_TLS_SKIP_VERIFY", false)
+}
+
+// GetMergedItem reads a key from a merged map of Vault secrets.
+// Mirrors GetVaultItem semantics (NA handling, panic on missing without default).
+func GetMergedItem[T any](merged map[string]any, key string, defaultValue ...T) T {
+	env, ok := merged[key]
+	if !ok || env == "" {
+		return getVaultDefaultValue(key, defaultValue...)
+	}
+
+	if isNAValue(env) {
+		return getVaultDefaultValue(key, defaultValue...)
+	}
+
+	return convertVaultValue[T](env, key)
 }
 
 func setConfigFromEnv() {
@@ -887,6 +1298,18 @@ func setConfigFromEnv() {
 	UPLOAD_MAX_SIZE_MB = GetEnv[int64]("UPLOAD_MAX_SIZE_MB", 10)
 	WS_READ_BUFFER_SIZE = GetEnv("WS_READ_BUFFER_SIZE", 1024)
 	WS_WRITE_BUFFER_SIZE = GetEnv("WS_WRITE_BUFFER_SIZE", 1024)
+
+	// KAFKA
+	KAFKA_BROKER = GetEnv("KAFKA_BROKER", "")
+	KAFKA_BROKERS = GetEnv("KAFKA_BROKERS", "")
+	KAFKA_BROKER_ADDRESSES = GetEnv("KAFKA_BROKER_ADDRESSES", "")
+	KAFKA_CLIENT_ID = GetEnv("KAFKA_CLIENT_ID", "")
+	KAFKA_GROUP = GetEnv("KAFKA_GROUP", "")
+	KAFKA_SASL_USER = GetEnv("KAFKA_SASL_USER", "")
+	KAFKA_SASL_PASSWORD = GetEnv("KAFKA_SASL_PASSWORD", "")
+	KAFKA_SASL_MECHANISM = GetEnv("KAFKA_SASL_MECHANISM", "SCRAM-SHA-512")
+	KAFKA_TLS_ENABLE = GetEnv("KAFKA_TLS_ENABLE", false)
+	KAFKA_TLS_SKIP_VERIFY = GetEnv("KAFKA_TLS_SKIP_VERIFY", false)
 
 	// SERVICE-SPECIFIC (migrated from per-service configs/env.go)
 	SERVICE_VERSION = GetEnv("SERVICE_VERSION", "")
