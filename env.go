@@ -2,9 +2,14 @@ package configs
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -31,7 +36,15 @@ var (
 	VAULT_SHARED_ROLE_ID    string // AppRole for shared paths (optional, falls back to VAULT_ROLE_ID)
 	VAULT_SHARED_SECRET_ID  string // AppRole for shared paths (optional, falls back to VAULT_SECRET_ID)
 	VAULT_FALLBACK_TO_ENV   bool
+	VAULT_CACHE_ENABLED     bool   // enable encrypted local cache for Vault-down resilience
+	VAULT_CACHE_KEY         string // AES-256-GCM key (hex, 64 chars) for cache encryption
+	VAULT_CACHE_DIR         string // cache directory (default: /run/secrets or temp dir)
+	VAULT_CACHE_TTL         int    // cache TTL in hours (default: 24)
+	VAULT_RETRY_MAX         int    // max retry attempts (default: 5)
 	SECRET_PROVIDER         string
+
+	// lastMergedVault stores the last successfully merged Vault data (for cache)
+	lastMergedVault map[string]any
 
 	// Common
 	SERVICE_NAME          string
@@ -450,6 +463,7 @@ func setupVaultMultiPath() error {
 	fmt.Printf("[Vault] All paths read successfully, merged %d keys\n", len(merged))
 	fmt.Printf("[Vault] Applying merged configuration...\n")
 	setConfigFromMergedVault(merged)
+	lastMergedVault = merged // store for cache
 	fmt.Printf("[Vault] Vault configuration applied successfully\n")
 	return nil
 }
@@ -630,6 +644,13 @@ func setupVaultConfig() {
 	VAULT_AUTH_METHOD = GetEnv("VAULT_AUTH_METHOD", "TOKEN")
 	VAULT_FALLBACK_TO_ENV = GetEnv("VAULT_FALLBACK_TO_ENV", false)
 
+	// Cache config for Vault-down resilience
+	VAULT_CACHE_ENABLED = GetEnv("VAULT_CACHE_ENABLED", false)
+	VAULT_CACHE_KEY = GetEnv("VAULT_CACHE_KEY", "")
+	VAULT_CACHE_DIR = GetEnv("VAULT_CACHE_DIR", "/run/secrets")
+	VAULT_CACHE_TTL = GetEnv("VAULT_CACHE_TTL", 24)
+	VAULT_RETRY_MAX = GetEnv("VAULT_RETRY_MAX", 5)
+
 	if VAULT_ADDR == "" {
 		panic("VAULT_ADDR (or VAULT_ENDPOINT) is not set on .env")
 	}
@@ -665,15 +686,190 @@ func setupVaultAuth() {
 }
 
 func handleVaultConnection() {
-	err := SetupVault()
-	if err != nil {
-		if VAULT_FALLBACK_TO_ENV {
-			fmt.Printf("Warning: Vault connection failed (%v), falling back to .env\n", err)
-			setConfigFromEnv()
-		} else {
-			panic(fmt.Sprintf("Vault connection failed: %v", err))
+	// Retry with exponential backoff: 2s, 4s, 8s, 16s, 32s (total ~62s)
+	var lastErr error
+	for attempt := 1; attempt <= VAULT_RETRY_MAX; attempt++ {
+		err := SetupVault()
+		if err == nil {
+			// Vault OK — write encrypted cache if enabled
+			if VAULT_CACHE_ENABLED && VAULT_CACHE_KEY != "" {
+				if cacheErr := writeVaultCache(); cacheErr != nil {
+					fmt.Printf("[Vault] Warning: failed to write cache: %v\n", cacheErr)
+				} else {
+					fmt.Printf("[Vault] Cache written successfully\n")
+				}
+			}
+			return
+		}
+		lastErr = err
+		if attempt < VAULT_RETRY_MAX {
+			backoff := time.Duration(1<<attempt) * time.Second // 2s, 4s, 8s, 16s, 32s
+			fmt.Printf("[Vault] Attempt %d/%d failed (%v), retrying in %v...\n", attempt, VAULT_RETRY_MAX, err, backoff)
+			time.Sleep(backoff)
 		}
 	}
+
+	// All retries exhausted — try cache, then .env, then panic
+	fmt.Printf("[Vault] All %d retries failed: %v\n", VAULT_RETRY_MAX, lastErr)
+
+	// Layer 1: Encrypted cache
+	if VAULT_CACHE_ENABLED && VAULT_CACHE_KEY != "" {
+		fmt.Printf("[Vault] Attempting to read from encrypted cache...\n")
+		if cacheErr := readVaultCache(); cacheErr == nil {
+			fmt.Printf("[Vault] WARNING: Using cached secrets (Vault unavailable). Cache may be stale.\n")
+			return
+		} else {
+			fmt.Printf("[Vault] Cache read failed: %v\n", cacheErr)
+		}
+	}
+
+	// Layer 2: Fallback to .env
+	if VAULT_FALLBACK_TO_ENV {
+		fmt.Printf("[Vault] WARNING: Falling back to .env (Vault unavailable, no cache). Some secrets may be missing.\n")
+		setConfigFromEnv()
+		return
+	}
+
+	// Layer 3: Fail fast
+	panic(fmt.Sprintf("Vault connection failed after %d retries: %v (no cache, no .env fallback)", VAULT_RETRY_MAX, lastErr))
+}
+
+// vaultCacheData is the structure of the encrypted cache file.
+type vaultCacheData struct {
+	Secrets   map[string]any `json:"secrets"`
+	CachedAt  time.Time      `json:"cached_at"`
+	ExpiresAt time.Time      `json:"expires_at"`
+	ServiceName string       `json:"service_name"`
+}
+
+// getVaultCachePath returns the path to the encrypted cache file.
+func getVaultCachePath() string {
+	safeName := strings.ReplaceAll(SERVICE_NAME, " ", "-")
+	safeName = strings.ReplaceAll(safeName, "/", "-")
+	return filepath.Join(VAULT_CACHE_DIR, fmt.Sprintf("bbo-vault-cache-%s.enc", safeName))
+}
+
+// writeVaultCache encrypts and writes the merged secrets to a local cache file.
+func writeVaultCache() error {
+	if lastMergedVault == nil {
+		return fmt.Errorf("no merged vault data to cache")
+	}
+
+	cache := vaultCacheData{
+		Secrets:     lastMergedVault,
+		CachedAt:    time.Now(),
+		ExpiresAt:   time.Now().Add(time.Duration(VAULT_CACHE_TTL) * time.Hour),
+		ServiceName: SERVICE_NAME,
+	}
+
+	plaintext, err := json.Marshal(cache)
+	if err != nil {
+		return fmt.Errorf("failed to marshal cache: %w", err)
+	}
+
+	ciphertext, err := encryptAESGCM(plaintext, []byte(VAULT_CACHE_KEY))
+	if err != nil {
+		return fmt.Errorf("failed to encrypt cache: %w", err)
+	}
+
+	cachePath := getVaultCachePath()
+	// Ensure directory exists
+	if err := os.MkdirAll(VAULT_CACHE_DIR, 0700); err != nil {
+		return fmt.Errorf("failed to create cache dir: %w", err)
+	}
+	// Write with restricted permissions (owner only)
+	if err := os.WriteFile(cachePath, ciphertext, 0600); err != nil {
+		return fmt.Errorf("failed to write cache file: %w", err)
+	}
+
+	return nil
+}
+
+// readVaultCache reads and decrypts the cached secrets.
+func readVaultCache() error {
+	cachePath := getVaultCachePath()
+	ciphertext, err := os.ReadFile(cachePath)
+	if err != nil {
+		return fmt.Errorf("failed to read cache file: %w", err)
+	}
+
+	plaintext, err := decryptAESGCM(ciphertext, []byte(VAULT_CACHE_KEY))
+	if err != nil {
+		return fmt.Errorf("failed to decrypt cache: %w", err)
+	}
+
+	var cache vaultCacheData
+	if err := json.Unmarshal(plaintext, &cache); err != nil {
+		return fmt.Errorf("failed to unmarshal cache: %w", err)
+	}
+
+	// Check TTL
+	if time.Now().After(cache.ExpiresAt) {
+		return fmt.Errorf("cache expired at %s (TTL %dh)", cache.ExpiresAt, VAULT_CACHE_TTL)
+	}
+
+	// Apply cached secrets
+	setConfigFromMergedVault(cache.Secrets)
+	fmt.Printf("[Vault] Cache age: %v (cached at %s)\n", time.Since(cache.CachedAt).Round(time.Second), cache.CachedAt.Format(time.RFC3339))
+	return nil
+}
+
+// encryptAESGCM encrypts plaintext using AES-256-GCM with the given hex-encoded key.
+func encryptAESGCM(plaintext, hexKey []byte) ([]byte, error) {
+	key, err := hex.DecodeString(string(hexKey))
+	if err != nil {
+		return nil, fmt.Errorf("invalid hex key: %w", err)
+	}
+	if len(key) != 32 {
+		return nil, fmt.Errorf("key must be 32 bytes (64 hex chars), got %d", len(key))
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+
+	// Prepend nonce to ciphertext
+	return gcm.Seal(nonce, nonce, plaintext, nil), nil
+}
+
+// decryptAESGCM decrypts ciphertext using AES-256-GCM with the given hex-encoded key.
+func decryptAESGCM(ciphertext, hexKey []byte) ([]byte, error) {
+	key, err := hex.DecodeString(string(hexKey))
+	if err != nil {
+		return nil, fmt.Errorf("invalid hex key: %w", err)
+	}
+	if len(key) != 32 {
+		return nil, fmt.Errorf("key must be 32 bytes (64 hex chars), got %d", len(key))
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+
+	nonceSize := gcm.NonceSize()
+	if len(ciphertext) < nonceSize {
+		return nil, fmt.Errorf("ciphertext too short")
+	}
+
+	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
+	return gcm.Open(nil, nonce, ciphertext, nil)
 }
 
 func setConfigFromVault(
