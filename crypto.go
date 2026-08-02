@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"os"
 	"strconv"
 	"strings"
 
@@ -143,6 +144,36 @@ func GeneratePassword(pwd string) (string, error) {
 		argon2Threads,
 		base64.RawStdEncoding.EncodeToString(salt),
 		base64.RawStdEncoding.EncodeToString(hash)), nil
+}
+
+// GenerateRandomPassword generates a cryptographically secure random password
+// of the given length using the URL-safe base64 alphabet. It is intended for
+// one-time bootstrap passwords (e.g. super admin seed) when no password is
+// supplied via configuration. The caller MUST ensure the password is delivered
+// to the operator via a secure channel (NOT stdout/logs) and force a password
+// change on first login.
+func GenerateRandomPassword(length int) (string, error) {
+	if length < 12 {
+		length = 20
+	}
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_$@"
+	buf := make([]byte, length)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("failed to generate random password: %w", err)
+	}
+	for i, b := range buf {
+		buf[i] = alphabet[int(b)%len(alphabet)]
+	}
+	return string(buf), nil
+}
+
+// WriteInitialPasswordToFile writes a one-time bootstrap password to a file
+// with restrictive permissions (0600) so the operator can retrieve it after
+// first startup. This is the secure alternative to logging the password to
+// stdout, which would leak it to centralized logging systems (ELK/Loki/etc).
+// The caller should log only the file PATH, never the password itself.
+func WriteInitialPasswordToFile(filepath, password string) error {
+	return os.WriteFile(filepath, []byte(password+"\n"), 0600)
 }
 
 // VerifyPassword checks a password against an encoded hash. It supports two

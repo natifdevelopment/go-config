@@ -22,26 +22,26 @@ import (
 
 var (
 	// Vault
-	VAULT_ADDR              string
-	VAULT_ENDPOINT          string
-	VAULT_TOKEN             string
-	VAULT_PATH              string
-	VAULT_MOUNT             string
-	VAULT_SECRET_PATH       string
-	VAULT_SECRET_PATHS      []string // multi-path support (comma-separated), takes precedence over VAULT_SECRET_PATH
-	VAULT_SHARED_SUBPATHS   []string // sub-paths to read from shared paths (comma-separated), default: all
-	VAULT_AUTH_METHOD       string
-	VAULT_ROLE_ID           string // AppRole for service-specific path
-	VAULT_SECRET_ID         string // AppRole for service-specific path
-	VAULT_SHARED_ROLE_ID    string // AppRole for shared paths (optional, falls back to VAULT_ROLE_ID)
-	VAULT_SHARED_SECRET_ID  string // AppRole for shared paths (optional, falls back to VAULT_SECRET_ID)
-	VAULT_FALLBACK_TO_ENV   bool
-	VAULT_CACHE_ENABLED     bool   // enable encrypted local cache for Vault-down resilience
-	VAULT_CACHE_KEY         string // AES-256-GCM key (hex, 64 chars) for cache encryption
-	VAULT_CACHE_DIR         string // cache directory (default: /run/secrets or temp dir)
-	VAULT_CACHE_TTL         int    // cache TTL in hours (default: 24)
-	VAULT_RETRY_MAX         int    // max retry attempts (default: 5)
-	SECRET_PROVIDER         string
+	VAULT_ADDR             string
+	VAULT_ENDPOINT         string
+	VAULT_TOKEN            string
+	VAULT_PATH             string
+	VAULT_MOUNT            string
+	VAULT_SECRET_PATH      string
+	VAULT_SECRET_PATHS     []string // multi-path support (comma-separated), takes precedence over VAULT_SECRET_PATH
+	VAULT_SHARED_SUBPATHS  []string // sub-paths to read from shared paths (comma-separated), default: all
+	VAULT_AUTH_METHOD      string
+	VAULT_ROLE_ID          string // AppRole for service-specific path
+	VAULT_SECRET_ID        string // AppRole for service-specific path
+	VAULT_SHARED_ROLE_ID   string // AppRole for shared paths (optional, falls back to VAULT_ROLE_ID)
+	VAULT_SHARED_SECRET_ID string // AppRole for shared paths (optional, falls back to VAULT_SECRET_ID)
+	VAULT_FALLBACK_TO_ENV  bool
+	VAULT_CACHE_ENABLED    bool   // enable encrypted local cache for Vault-down resilience
+	VAULT_CACHE_KEY        string // AES-256-GCM key (hex, 64 chars) for cache encryption
+	VAULT_CACHE_DIR        string // cache directory (default: /run/secrets or temp dir)
+	VAULT_CACHE_TTL        int    // cache TTL in hours (default: 24)
+	VAULT_RETRY_MAX        int    // max retry attempts (default: 5)
+	SECRET_PROVIDER        string
 
 	// lastMergedVault stores the last successfully merged Vault data (for cache)
 	lastMergedVault map[string]any
@@ -65,6 +65,7 @@ var (
 	DATABASE_POSTGRESQL_USER     string
 	DATABASE_POSTGRESQL_PASSWORD string
 	DATABASE_POSTGRESQL_DB_NAME  string
+	DATABASE_SSLMODE             string
 
 	// Postgre Slave (read-only replica)
 	DATABASE_POSTGRESQL_SLAVE_HOST     string
@@ -120,7 +121,8 @@ var (
 	TESTER_EMAIL string
 
 	// Super Admin Account
-	SUPER_ADMIN_EMAIL string
+	SUPER_ADMIN_EMAIL    string
+	SUPER_ADMIN_PASSWORD string
 
 	// FE
 	FE_APP_NAME string
@@ -164,16 +166,16 @@ var (
 	WS_WRITE_BUFFER_SIZE int
 
 	// KAFKA
-	KAFKA_BROKER            string
-	KAFKA_BROKERS           string
-	KAFKA_BROKER_ADDRESSES  string
-	KAFKA_CLIENT_ID         string
-	KAFKA_GROUP             string
-	KAFKA_SASL_USER         string
-	KAFKA_SASL_PASSWORD     string
-	KAFKA_SASL_MECHANISM    string
-	KAFKA_TLS_ENABLE        bool
-	KAFKA_TLS_SKIP_VERIFY   bool
+	KAFKA_BROKER           string
+	KAFKA_BROKERS          string
+	KAFKA_BROKER_ADDRESSES string
+	KAFKA_CLIENT_ID        string
+	KAFKA_GROUP            string
+	KAFKA_SASL_USER        string
+	KAFKA_SASL_PASSWORD    string
+	KAFKA_SASL_MECHANISM   string
+	KAFKA_TLS_ENABLE       bool
+	KAFKA_TLS_SKIP_VERIFY  bool
 
 	// SERVICE-SPECIFIC (migrated from per-service configs/env.go)
 	SERVICE_VERSION string
@@ -360,7 +362,8 @@ func setupVaultSinglePath() error {
 // Each path is tried as flat first, then hierarchical sub-paths.
 //
 // Hierarchical sub-paths (for shared paths like development/bbo/shared):
-//   main, database_postgre, redis, s3, sso, mail, llm
+//
+//	main, database_postgre, redis, s3, sso, mail, llm
 //
 // Passwords live in their respective sub-path (e.g., DB password in database_postgre,
 // Redis password in redis, S3 keys in s3, SSO secret in sso, Mail password in mail,
@@ -736,10 +739,10 @@ func handleVaultConnection() {
 
 // vaultCacheData is the structure of the encrypted cache file.
 type vaultCacheData struct {
-	Secrets   map[string]any `json:"secrets"`
-	CachedAt  time.Time      `json:"cached_at"`
-	ExpiresAt time.Time      `json:"expires_at"`
-	ServiceName string       `json:"service_name"`
+	Secrets     map[string]any `json:"secrets"`
+	CachedAt    time.Time      `json:"cached_at"`
+	ExpiresAt   time.Time      `json:"expires_at"`
+	ServiceName string         `json:"service_name"`
 }
 
 // getVaultCachePath returns the path to the encrypted cache file.
@@ -884,6 +887,7 @@ func setConfigFromVault(
 
 	TESTER_EMAIL = GetVaultItem(sMain, "TESTER_EMAIL", "")
 	SUPER_ADMIN_EMAIL = GetVaultItem(sMain, "SUPER_ADMIN_EMAIL", "")
+	SUPER_ADMIN_PASSWORD = GetVaultItem(sMain, "SUPER_ADMIN_PASSWORD", "")
 	RATE_LIMITER_ALERT_EMAIL = GetVaultItem(sMain, "RATE_LIMITER_ALERT_EMAIL", "")
 
 	FE_APP_NAME = GetVaultItem[string](sMain, "FE_APP_NAME")
@@ -898,6 +902,7 @@ func setConfigFromVault(
 	DATABASE_POSTGRESQL_USER = GetVaultItem[string](sDatabase, "DATABASE_POSTGRESQL_USER")
 	DATABASE_POSTGRESQL_PASSWORD = GetVaultItem[string](sSecret, "DATABASE_POSTGRESQL_PASSWORD")
 	DATABASE_POSTGRESQL_DB_NAME = GetVaultItem[string](sDatabase, "DATABASE_POSTGRESQL_DB_NAME")
+	DATABASE_SSLMODE = GetVaultItem(sDatabase, "DATABASE_SSLMODE", "disable")
 	ENABLE_AUTO_MIGRATION = GetVaultItem(sDatabase, "ENABLE_AUTO_MIGRATION", true)
 
 	// POSTGRE SLAVE
@@ -1053,6 +1058,7 @@ func setConfigFromFlatVault(sAll *vault.Response[schema.KvV2ReadResponse]) {
 
 	TESTER_EMAIL = GetVaultItem(sAll, "TESTER_EMAIL", "")
 	SUPER_ADMIN_EMAIL = GetVaultItem(sAll, "SUPER_ADMIN_EMAIL", "")
+	SUPER_ADMIN_PASSWORD = GetVaultItem(sAll, "SUPER_ADMIN_PASSWORD", "")
 	RATE_LIMITER_ALERT_EMAIL = GetVaultItem(sAll, "RATE_LIMITER_ALERT_EMAIL", "")
 
 	FE_APP_NAME = GetVaultItem[string](sAll, "FE_APP_NAME")
@@ -1067,6 +1073,7 @@ func setConfigFromFlatVault(sAll *vault.Response[schema.KvV2ReadResponse]) {
 	DATABASE_POSTGRESQL_USER = GetVaultItem[string](sAll, "DATABASE_POSTGRESQL_USER")
 	DATABASE_POSTGRESQL_PASSWORD = GetVaultItem[string](sAll, "DATABASE_POSTGRESQL_PASSWORD")
 	DATABASE_POSTGRESQL_DB_NAME = GetVaultItem[string](sAll, "DATABASE_POSTGRESQL_DB_NAME")
+	DATABASE_SSLMODE = GetVaultItem(sAll, "DATABASE_SSLMODE", "disable")
 	ENABLE_AUTO_MIGRATION = GetVaultItem(sAll, "ENABLE_AUTO_MIGRATION", true)
 
 	// POSTGRE SLAVE
@@ -1224,6 +1231,7 @@ func setConfigFromMergedVault(merged map[string]any) {
 
 	TESTER_EMAIL = GetMergedItem(merged, "TESTER_EMAIL", "")
 	SUPER_ADMIN_EMAIL = GetMergedItem(merged, "SUPER_ADMIN_EMAIL", "")
+	SUPER_ADMIN_PASSWORD = GetMergedItem(merged, "SUPER_ADMIN_PASSWORD", "")
 	RATE_LIMITER_ALERT_EMAIL = GetMergedItem(merged, "RATE_LIMITER_ALERT_EMAIL", "")
 
 	FE_APP_NAME = GetMergedItem[string](merged, "FE_APP_NAME")
@@ -1238,6 +1246,7 @@ func setConfigFromMergedVault(merged map[string]any) {
 	DATABASE_POSTGRESQL_USER = GetMergedItem[string](merged, "DATABASE_POSTGRESQL_USER")
 	DATABASE_POSTGRESQL_PASSWORD = GetMergedItem[string](merged, "DATABASE_POSTGRESQL_PASSWORD")
 	DATABASE_POSTGRESQL_DB_NAME = GetMergedItem[string](merged, "DATABASE_POSTGRESQL_DB_NAME")
+	DATABASE_SSLMODE = GetMergedItem(merged, "DATABASE_SSLMODE", "disable")
 	ENABLE_AUTO_MIGRATION = GetMergedItem(merged, "ENABLE_AUTO_MIGRATION", true)
 
 	// POSTGRE SLAVE
@@ -1411,6 +1420,7 @@ func setConfigFromEnv() {
 	DATABASE_POSTGRESQL_USER = GetEnv[string]("DATABASE_POSTGRESQL_USER")
 	DATABASE_POSTGRESQL_PASSWORD = GetEnv[string]("DATABASE_POSTGRESQL_PASSWORD")
 	DATABASE_POSTGRESQL_DB_NAME = GetEnv[string]("DATABASE_POSTGRESQL_DB_NAME")
+	DATABASE_SSLMODE = GetEnv("DATABASE_SSLMODE", "disable")
 	ENABLE_AUTO_MIGRATION = GetEnv("ENABLE_AUTO_MIGRATION", true)
 
 	// POSTGRE SLAVE (optional, empty = no slave)
@@ -1470,6 +1480,7 @@ func setConfigFromEnv() {
 
 	// SUPER ADMIN LIST
 	SUPER_ADMIN_EMAIL = GetEnv("SUPER_ADMIN_EMAIL", "")
+	SUPER_ADMIN_PASSWORD = GetEnv("SUPER_ADMIN_PASSWORD", "")
 
 	// FE
 	FE_APP_NAME = GetEnv[string]("FE_APP_NAME")
