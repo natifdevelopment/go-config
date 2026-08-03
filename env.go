@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -19,6 +20,27 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/natifdevelopment/go-types"
 )
+
+// vaultDebug controls whether detailed Vault setup information is logged.
+// Set VAULT_DEBUG=1 to enable. Default: off (only errors and a single
+// success/failure line are logged). This prevents sensitive operational
+// details (Vault address, auth method, secret paths) from leaking to
+// stdout/logs (OWASP A09:2021 / CWE-532).
+var vaultDebug = os.Getenv("VAULT_DEBUG") == "1" || os.Getenv("VAULT_DEBUG") == "true"
+
+// vaultLog logs a message via the standard logger (stderr) at debug level.
+// Only logs when VAULT_DEBUG is enabled, except for errors which always log.
+func vaultDebugLog(format string, args ...any) {
+	if vaultDebug {
+		log.Printf("[Vault] "+format, args...)
+	}
+}
+
+// vaultLogAlways logs a message via the standard logger (stderr) regardless
+// of debug mode. Used for success/failure status only (no sensitive details).
+func vaultLog(format string, args ...any) {
+	log.Printf("[Vault] "+format, args...)
+}
 
 var (
 	// Vault
@@ -301,29 +323,37 @@ func GetEnv[T any](key string, defaultValue ...T) T {
 }
 
 func SetupVault() error {
-	fmt.Printf("[Vault] Starting Vault connection setup...\n")
-	fmt.Printf("[Vault] Vault Address: %s\n", VAULT_ADDR)
-	fmt.Printf("[Vault] Auth Method: %s\n", VAULT_AUTH_METHOD)
-	fmt.Printf("[Vault] Mount: %s\n", VAULT_MOUNT)
+	vaultDebugLog("Starting Vault connection setup...")
+	vaultDebugLog("Vault Address: %s", VAULT_ADDR)
+	vaultDebugLog("Auth Method: %s", VAULT_AUTH_METHOD)
+	vaultDebugLog("Mount: %s", VAULT_MOUNT)
 
+	var err error
 	// Multi-path mode: read from multiple paths and merge
 	if len(VAULT_SECRET_PATHS) > 0 {
-		fmt.Printf("[Vault] Multi-path mode: %d paths\n", len(VAULT_SECRET_PATHS))
+		vaultDebugLog("Multi-path mode: %d paths", len(VAULT_SECRET_PATHS))
 		for i, p := range VAULT_SECRET_PATHS {
-			fmt.Printf("[Vault]   Path %d: %s\n", i+1, p)
+			vaultDebugLog("  Path %d: %s", i+1, p)
 		}
-		return setupVaultMultiPath()
+		err = setupVaultMultiPath()
+	} else {
+		// Single-path mode (backward compatible)
+		vaultDebugLog("Secret Path: %s", VAULT_SECRET_PATH)
+		err = setupVaultSinglePath()
 	}
 
-	// Single-path mode (backward compatible)
-	fmt.Printf("[Vault] Secret Path: %s\n", VAULT_SECRET_PATH)
-	return setupVaultSinglePath()
+	if err != nil {
+		vaultLog("Vault setup failed: %v", err)
+	} else {
+		vaultLog("Vault setup completed successfully")
+	}
+	return err
 }
 
 func setupVaultSinglePath() error {
 	ctx := context.Background()
 
-	fmt.Printf("[Vault] Creating Vault client...\n")
+	vaultDebugLog("Creating Vault client...")
 	client, err := vault.New(
 		vault.WithAddress(VAULT_ADDR),
 		vault.WithRequestTimeout(30*time.Second),
@@ -331,7 +361,7 @@ func setupVaultSinglePath() error {
 	if err != nil {
 		return fmt.Errorf("failed to create vault client: %w", err)
 	}
-	fmt.Printf("[Vault] Vault client created successfully\n")
+	vaultDebugLog("Vault client created successfully")
 
 	if err := authenticateVaultClient(ctx, client); err != nil {
 		return err
@@ -341,19 +371,19 @@ func setupVaultSinglePath() error {
 	if secretPrefix != "" {
 		secretPrefix = secretPrefix + "/"
 	}
-	fmt.Printf("[Vault] Secret path prefix: %s\n", secretPrefix)
+	vaultDebugLog("Secret path prefix: %s", secretPrefix)
 
-	fmt.Printf("[Vault] Reading secrets from Vault...\n")
-	fmt.Printf("[Vault]   - Attempting to read flat secret structure: %s\n", secretPrefix)
+	vaultDebugLog("Reading secrets from Vault...")
+	vaultDebugLog("  - Attempting to read flat secret structure: %s", secretPrefix)
 	sAll, err := client.Secrets.KvV2Read(ctx, strings.TrimSuffix(secretPrefix, "/"), vault.WithMountPath(VAULT_MOUNT))
 	if err != nil {
 		return readAndApplyHierarchicalSecrets(ctx, client, secretPrefix)
 	}
 
-	fmt.Printf("[Vault]   - Flat secret structure found, parsing keys...\n")
-	fmt.Printf("[Vault] All secrets read successfully, applying configuration...\n")
+	vaultDebugLog("  - Flat secret structure found, parsing keys...")
+	vaultDebugLog("All secrets read successfully, applying configuration...")
 	setConfigFromFlatVault(sAll)
-	fmt.Printf("[Vault] Vault configuration applied successfully\n")
+	vaultDebugLog("Vault configuration applied successfully")
 	return nil
 }
 
@@ -375,7 +405,7 @@ func setupVaultSinglePath() error {
 func setupVaultMultiPath() error {
 	ctx := context.Background()
 
-	fmt.Printf("[Vault] Creating Vault client...\n")
+	vaultDebugLog("Creating Vault client...")
 	client, err := vault.New(
 		vault.WithAddress(VAULT_ADDR),
 		vault.WithRequestTimeout(30*time.Second),
@@ -383,7 +413,7 @@ func setupVaultMultiPath() error {
 	if err != nil {
 		return fmt.Errorf("failed to create vault client: %w", err)
 	}
-	fmt.Printf("[Vault] Vault client created successfully\n")
+	vaultDebugLog("Vault client created successfully")
 
 	// merged accumulates all secrets from all paths; later paths override earlier
 	merged := make(map[string]any)
@@ -395,7 +425,7 @@ func setupVaultMultiPath() error {
 	hierarchicalSubPaths := defaultSubPaths
 	if len(VAULT_SHARED_SUBPATHS) > 0 {
 		hierarchicalSubPaths = VAULT_SHARED_SUBPATHS
-		fmt.Printf("[Vault] Using selective sub-paths: %v\n", hierarchicalSubPaths)
+		vaultDebugLog("Using selective sub-paths: %v", hierarchicalSubPaths)
 	}
 
 	// Detect if shared AppRole is different from service AppRole
@@ -405,7 +435,7 @@ func setupVaultMultiPath() error {
 	// Create shared client if dual AppRole
 	var sharedClient *vault.Client
 	if useDualAppRole {
-		fmt.Printf("[Vault] Using dual AppRole: shared + service-specific\n")
+		vaultDebugLog("Using dual AppRole: shared + service-specific")
 		sharedClient, err = vault.New(
 			vault.WithAddress(VAULT_ADDR),
 			vault.WithRequestTimeout(30*time.Second),
@@ -426,34 +456,34 @@ func setupVaultMultiPath() error {
 	// Determine which paths are "shared" (use shared AppRole) vs "service-specific" (use service AppRole)
 	// Heuristic: path containing "/shared" uses shared AppRole, others use service AppRole
 	for _, path := range VAULT_SECRET_PATHS {
-		fmt.Printf("[Vault] Reading path: %s\n", path)
+		vaultDebugLog("Reading path: %s", path)
 
 		// Select client: shared paths use sharedClient (if dual), others use service client
 		activeClient := client
 		if useDualAppRole && strings.Contains(path, "/shared") {
 			activeClient = sharedClient
-			fmt.Printf("[Vault]   - Using shared AppRole for this path\n")
+			vaultDebugLog("  - Using shared AppRole for this path")
 		}
 
 		// Try flat read first (service-specific paths are usually flat)
 		sAll, err := activeClient.Secrets.KvV2Read(ctx, path, vault.WithMountPath(VAULT_MOUNT))
 		if err == nil {
-			fmt.Printf("[Vault]   - Flat structure found for: %s\n", path)
+			vaultDebugLog("  - Flat structure found for: %s", path)
 			mergeVaultData(merged, sAll.Data.Data)
 			continue
 		}
 
 		// Try hierarchical sub-paths (shared paths use this structure)
-		fmt.Printf("[Vault]   - Flat failed for %s, trying hierarchical...\n", path)
+		vaultDebugLog("  - Flat failed for %s, trying hierarchical...", path)
 		anySuccess := false
 		for _, sub := range hierarchicalSubPaths {
 			fullPath := path + "/" + sub
 			resp, err := activeClient.Secrets.KvV2Read(ctx, fullPath, vault.WithMountPath(VAULT_MOUNT))
 			if err != nil {
-				fmt.Printf("[Vault]   - %s/%s: not found (skipping)\n", path, sub)
+				vaultDebugLog("  - %s/%s: not found (skipping)", path, sub)
 				continue
 			}
-			fmt.Printf("[Vault]   - %s/%s: OK\n", path, sub)
+			vaultDebugLog("  - %s/%s: OK", path, sub)
 			mergeVaultData(merged, resp.Data.Data)
 			anySuccess = true
 		}
@@ -463,17 +493,17 @@ func setupVaultMultiPath() error {
 		}
 	}
 
-	fmt.Printf("[Vault] All paths read successfully, merged %d keys\n", len(merged))
-	fmt.Printf("[Vault] Applying merged configuration...\n")
+	vaultDebugLog("All paths read successfully, merged %d keys", len(merged))
+	vaultDebugLog("Applying merged configuration...")
 	setConfigFromMergedVault(merged)
 	lastMergedVault = merged // store for cache
-	fmt.Printf("[Vault] Vault configuration applied successfully\n")
+	vaultDebugLog("Vault configuration applied successfully")
 	return nil
 }
 
 // authenticateSharedAppRole logs in with the shared AppRole credentials.
 func authenticateSharedAppRole(ctx context.Context, client *vault.Client) error {
-	fmt.Printf("[Vault] Using shared AppRole authentication...\n")
+	vaultDebugLog("Using shared AppRole authentication...")
 	if VAULT_SHARED_ROLE_ID == "" || VAULT_SHARED_SECRET_ID == "" {
 		return fmt.Errorf("VAULT_SHARED_ROLE_ID and VAULT_SHARED_SECRET_ID are required for shared AppRole")
 	}
@@ -487,7 +517,7 @@ func authenticateSharedAppRole(ctx context.Context, client *vault.Client) error 
 	if err := client.SetToken(resp.Auth.ClientToken); err != nil {
 		return fmt.Errorf("failed to set shared vault token: %w", err)
 	}
-	fmt.Printf("[Vault] Shared AppRole login successful\n")
+	vaultDebugLog("Shared AppRole login successful")
 	return nil
 }
 
@@ -506,11 +536,11 @@ func authenticateVaultClient(ctx context.Context, client *vault.Client) error {
 }
 
 func authenticateAppRole(ctx context.Context, client *vault.Client) error {
-	fmt.Printf("[Vault] Using AppRole authentication...\n")
+	vaultDebugLog("Using AppRole authentication...")
 	if VAULT_ROLE_ID == "" || VAULT_SECRET_ID == "" {
 		return fmt.Errorf("VAULT_ROLE_ID and VAULT_SECRET_ID are required for AppRole authentication")
 	}
-	fmt.Printf("[Vault] Attempting AppRole login...\n")
+	vaultDebugLog("Attempting AppRole login...")
 
 	resp, err := client.Auth.AppRoleLogin(ctx, schema.AppRoleLoginRequest{
 		RoleId:   VAULT_ROLE_ID,
@@ -519,46 +549,46 @@ func authenticateAppRole(ctx context.Context, client *vault.Client) error {
 	if err != nil {
 		return fmt.Errorf("failed to login with AppRole: %w", err)
 	}
-	fmt.Printf("[Vault] AppRole login successful\n")
+	vaultDebugLog("AppRole login successful")
 
 	if err := client.SetToken(resp.Auth.ClientToken); err != nil {
 		return fmt.Errorf("failed to set vault token: %w", err)
 	}
-	fmt.Printf("[Vault] Vault token set successfully\n")
+	vaultDebugLog("Vault token set successfully")
 	return nil
 }
 
 func authenticateToken(client *vault.Client) error {
-	fmt.Printf("[Vault] Using Token authentication...\n")
+	vaultDebugLog("Using Token authentication...")
 	if VAULT_TOKEN == "" {
 		return fmt.Errorf("VAULT_TOKEN is required for token authentication")
 	}
 	if err := client.SetToken(VAULT_TOKEN); err != nil {
 		return fmt.Errorf("failed to set vault token: %w", err)
 	}
-	fmt.Printf("[Vault] Vault token set successfully\n")
+	vaultDebugLog("Vault token set successfully")
 	return nil
 }
 
 func readAndApplyHierarchicalSecrets(ctx context.Context, client *vault.Client, prefix string) error {
-	fmt.Printf("[Vault]   - Flat structure failed, trying hierarchical structure...\n")
+	vaultDebugLog("  - Flat structure failed, trying hierarchical structure...")
 
 	paths := []string{"main", "database", "s3", "secret", "sso"}
 	results := make(map[string]*vault.Response[schema.KvV2ReadResponse])
 
 	for _, p := range paths {
-		fmt.Printf("[Vault]   - Reading %s secret...\n", p)
+		vaultDebugLog("  - Reading %s secret...", p)
 		resp, err := client.Secrets.KvV2Read(ctx, prefix+p, vault.WithMountPath(VAULT_MOUNT))
 		if err != nil {
 			return fmt.Errorf("failed to read %s secret: %w", p, err)
 		}
-		fmt.Printf("[Vault]   - %s secret: OK\n", p)
+		vaultDebugLog("  - %s secret: OK", p)
 		results[p] = resp
 	}
 
-	fmt.Printf("[Vault] All secrets read successfully, applying configuration...\n")
+	vaultDebugLog("All secrets read successfully, applying configuration...")
 	setConfigFromVault(results["main"], results["database"], results["s3"], results["secret"], results["sso"])
-	fmt.Printf("[Vault] Vault configuration applied successfully\n")
+	vaultDebugLog("Vault configuration applied successfully")
 	return nil
 }
 
@@ -697,9 +727,9 @@ func handleVaultConnection() {
 			// Vault OK — write encrypted cache if enabled
 			if VAULT_CACHE_ENABLED && VAULT_CACHE_KEY != "" {
 				if cacheErr := writeVaultCache(); cacheErr != nil {
-					fmt.Printf("[Vault] Warning: failed to write cache: %v\n", cacheErr)
+					vaultDebugLog("Warning: failed to write cache: %v", cacheErr)
 				} else {
-					fmt.Printf("[Vault] Cache written successfully\n")
+					vaultDebugLog("Cache written successfully")
 				}
 			}
 			return
@@ -707,28 +737,28 @@ func handleVaultConnection() {
 		lastErr = err
 		if attempt < VAULT_RETRY_MAX {
 			backoff := time.Duration(1<<attempt) * time.Second // 2s, 4s, 8s, 16s, 32s
-			fmt.Printf("[Vault] Attempt %d/%d failed (%v), retrying in %v...\n", attempt, VAULT_RETRY_MAX, err, backoff)
+			vaultDebugLog("Attempt %d/%d failed (%v), retrying in %v...", attempt, VAULT_RETRY_MAX, err, backoff)
 			time.Sleep(backoff)
 		}
 	}
 
 	// All retries exhausted — try cache, then .env, then panic
-	fmt.Printf("[Vault] All %d retries failed: %v\n", VAULT_RETRY_MAX, lastErr)
+	vaultDebugLog("All %d retries failed: %v", VAULT_RETRY_MAX, lastErr)
 
 	// Layer 1: Encrypted cache
 	if VAULT_CACHE_ENABLED && VAULT_CACHE_KEY != "" {
-		fmt.Printf("[Vault] Attempting to read from encrypted cache...\n")
+		vaultDebugLog("Attempting to read from encrypted cache...")
 		if cacheErr := readVaultCache(); cacheErr == nil {
-			fmt.Printf("[Vault] WARNING: Using cached secrets (Vault unavailable). Cache may be stale.\n")
+			vaultDebugLog("WARNING: Using cached secrets (Vault unavailable). Cache may be stale.")
 			return
 		} else {
-			fmt.Printf("[Vault] Cache read failed: %v\n", cacheErr)
+			vaultDebugLog("Cache read failed: %v", cacheErr)
 		}
 	}
 
 	// Layer 2: Fallback to .env
 	if VAULT_FALLBACK_TO_ENV {
-		fmt.Printf("[Vault] WARNING: Falling back to .env (Vault unavailable, no cache). Some secrets may be missing.\n")
+		vaultDebugLog("WARNING: Falling back to .env (Vault unavailable, no cache). Some secrets may be missing.")
 		setConfigFromEnv()
 		return
 	}
@@ -813,7 +843,7 @@ func readVaultCache() error {
 
 	// Apply cached secrets
 	setConfigFromMergedVault(cache.Secrets)
-	fmt.Printf("[Vault] Cache age: %v (cached at %s)\n", time.Since(cache.CachedAt).Round(time.Second), cache.CachedAt.Format(time.RFC3339))
+	vaultDebugLog("Cache age: %v (cached at %s)", time.Since(cache.CachedAt).Round(time.Second), cache.CachedAt.Format(time.RFC3339))
 	return nil
 }
 
